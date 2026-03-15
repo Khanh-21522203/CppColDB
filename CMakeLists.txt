@@ -4,6 +4,7 @@ project(CppColDB VERSION 0.1 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ---------------------------------------------------------------------------
 # Library — all src/**/*.cpp compiled into a static lib
@@ -41,25 +42,28 @@ endfunction()
 # Uncomment each block as you reach the corresponding phase.
 
 # Phase 0 — Core types & error handling
-# add_phase_tests(test_phase0
-#     test/common/test_types.cpp
-#     test/common/test_data_chunk.cpp
-#     test/common/test_error_handling.cpp
-# )
+add_phase_tests(test_phase0
+    test/common/test_main.cpp
+    test/common/test_types.cpp
+    test/common/test_data_chunk.cpp
+    test/common/test_error_handling.cpp
+)
 
 # Phase 1 — SQL parser
-# add_phase_tests(test_phase1
-#     test/parser/test_tokenizer.cpp
-#     test/parser/test_parser.cpp
-# )
+add_phase_tests(test_phase1
+    test/parser/test_main.cpp
+    test/parser/test_tokenizer.cpp
+    test/parser/test_parser.cpp
+)
 
 # Phase 2 — Storage foundation
-# add_phase_tests(test_phase2
-#     test/storage/test_block_file.cpp
-#     test/storage/test_buffer_manager.cpp
-#     test/storage/test_wal.cpp
-#     test/storage/test_compression.cpp
-# )
+add_phase_tests(test_phase2
+    test/storage/test_main.cpp
+    test/storage/test_block_file.cpp
+    test/storage/test_buffer_manager.cpp
+    test/storage/test_wal.cpp
+    test/storage/test_compression.cpp
+)
 
 # Phase 3 — Column storage
 # add_phase_tests(test_phase3
