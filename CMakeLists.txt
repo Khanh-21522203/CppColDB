@@ -66,10 +66,11 @@ add_phase_tests(test_phase2
 )
 
 # Phase 3 — Column storage
-# add_phase_tests(test_phase3
-#     test/storage/test_column_chunk.cpp
-#     test/storage/test_row_group.cpp
-# )
+add_phase_tests(test_phase3
+    test/storage/test_phase3_main.cpp
+    test/storage/test_column_chunk.cpp
+    test/storage/test_row_group.cpp
+)
 
 # Phase 4 — Catalog + Transaction
 # add_phase_tests(test_phase4
