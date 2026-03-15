@@ -81,9 +81,10 @@ add_phase_tests(test_phase4
 )
 
 # Phase 5 — Execution foundation
-# add_phase_tests(test_phase5
-#     test/execution/test_pipeline_executor.cpp
-# )
+add_phase_tests(test_phase5
+    test/execution/test_phase5_main.cpp
+    test/execution/test_pipeline_executor.cpp
+)
 
 # Phase 6 — Basic operators
 # add_phase_tests(test_phase6
