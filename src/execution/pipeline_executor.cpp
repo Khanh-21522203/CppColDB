@@ -53,7 +53,10 @@ void PipelineExecutor::Execute() {
                     *current_input, output_chunk_, *op_states_[i], ctx_);
 
                 if (op_result == OperatorResultType::FINISHED) {
-                    // e.g. PhysicalLimit hit its row cap — stop everything.
+                    // e.g. PhysicalLimit hit its row cap — flush last output then stop.
+                    if (output_chunk_.count > 0) {
+                        pipeline_.sink->Consume(output_chunk_, *sink_state_, ctx_);
+                    }
                     pipeline_.sink->Finalize(*sink_state_, ctx_);
                     return;
                 }

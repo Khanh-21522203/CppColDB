@@ -87,18 +87,21 @@ add_phase_tests(test_phase5
 )
 
 # Phase 6 — Basic operators
-# add_phase_tests(test_phase6
-#     test/execution/test_table_scan.cpp
-#     test/execution/test_filter.cpp
-#     test/execution/test_projection.cpp
-# )
+add_phase_tests(test_phase6
+    test/execution/test_phase6_main.cpp
+    test/execution/test_table_scan.cpp
+    test/execution/test_filter.cpp
+    test/execution/test_projection.cpp
+    test/execution/test_limit.cpp
+)
 
 # Phase 7 — Query planner
-# add_phase_tests(test_phase7
-#     test/planner/test_binder.cpp
-#     test/planner/test_optimizer.cpp
-#     test/planner/test_physical_planner.cpp
-# )
+add_phase_tests(test_phase7
+    test/planner/test_phase7_main.cpp
+    test/planner/test_binder.cpp
+    test/planner/test_optimizer.cpp
+    test/planner/test_physical_planner.cpp
+)
 
 # Phase 8 — Advanced operators
 # add_phase_tests(test_phase8

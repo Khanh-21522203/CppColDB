@@ -1,6 +1,13 @@
 #pragma once
+
 namespace cppcoldb {
-// Minimal stub used by execution operators in Phases 5–8.
-// Full implementation (Parser, Binder, Transaction, Catalog) in Phase 9.
-struct ClientContext {};
+
+class Catalog;
+class Transaction;
+
+struct ClientContext {
+    Catalog*     catalog     = nullptr;
+    Transaction* transaction = nullptr;
+};
+
 } // namespace cppcoldb

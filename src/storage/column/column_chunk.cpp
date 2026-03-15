@@ -118,6 +118,9 @@ void ColumnChunk::Flush() {
 
 void ColumnChunk::AppendFromVector(const DataVector& vec, size_t count) {
     for (size_t i = 0; i < count; ++i) {
+        if (pending_data_.count >= STANDARD_VECTOR_SIZE) {
+            Flush();
+        }
         DataVectorAppend(pending_data_, vec, i);
     }
     UpdateCombinedStats(vec, count);
