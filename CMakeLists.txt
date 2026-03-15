@@ -73,11 +73,12 @@ add_phase_tests(test_phase3
 )
 
 # Phase 4 — Catalog + Transaction
-# add_phase_tests(test_phase4
-#     test/catalog/test_catalog.cpp
-#     test/transaction/test_transaction.cpp
-#     test/transaction/test_mvcc.cpp
-# )
+add_phase_tests(test_phase4
+    test/catalog/test_phase4_main.cpp
+    test/catalog/test_catalog.cpp
+    test/transaction/test_transaction.cpp
+    test/transaction/test_mvcc.cpp
+)
 
 # Phase 5 — Execution foundation
 # add_phase_tests(test_phase5
