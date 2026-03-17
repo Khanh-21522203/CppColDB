@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include "execution/executor.hpp"
+#include "profiler/query_profiler.hpp"
 
 namespace cppcoldb {
 
@@ -16,6 +17,9 @@ struct ClientContext {
     Transaction*        transaction = nullptr;
     TransactionManager* txn_manager = nullptr;
     WAL*                wal         = nullptr;   // nullptr for in-memory
+
+    bool          profiling_enabled_ = false;
+    QueryProfiler profiler_;
 
     // Execute one SQL statement. The caller is responsible for having set
     // catalog and transaction before calling this (Connection does so).

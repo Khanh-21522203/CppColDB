@@ -117,6 +117,7 @@ add_phase_tests(test_phase9
 )
 
 # Phase 10 — Query profiler
-# add_phase_tests(test_phase10
-#     test/profiler/test_query_profiler.cpp
-# )
+add_phase_tests(test_phase10
+    test/profiler/test_phase10_main.cpp
+    test/profiler/test_query_profiler.cpp
+)

@@ -1,17 +1,20 @@
 #pragma once
 #include <vector>
 #include <string>
+#include <optional>
 #include "execution/physical_operator.hpp"
+#include "profiler/profiling_result.hpp"
 
 namespace cppcoldb {
 
 // Holds the results of a query.
 struct QueryResult {
-    std::vector<std::string> column_names;
-    std::vector<TypeId>      column_types;
-    std::vector<DataChunk>   chunks;
-    bool                     success = true;
-    std::string              error_message;
+    std::vector<std::string>       column_names;
+    std::vector<TypeId>            column_types;
+    std::vector<DataChunk>         chunks;
+    bool                           success = true;
+    std::string                    error_message;
+    std::optional<ProfilingResult> profiling_result; // set when profiling enabled
 
     size_t RowCount() const {
         size_t total = 0;

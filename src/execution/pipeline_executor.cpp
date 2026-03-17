@@ -1,5 +1,6 @@
 #include "execution/pipeline_executor.hpp"
 #include "main/client_context.hpp"
+#include "profiler/operator_profiler.hpp"
 
 namespace cppcoldb {
 
@@ -20,8 +21,19 @@ void PipelineExecutor::Execute() {
     // --- Main loop ---
     while (true) {
         input_chunk_.Reset();
-        auto source_result = pipeline_.source->GetData(
-            *source_state_, input_chunk_, ctx_);
+
+        OperatorResultType source_result;
+        {
+            PhysicalOperator* src = pipeline_.source;
+            if (ctx_.profiler_.IsActive() && src->profile_idx >= 0) {
+                OperatorProfileGuard g(ctx_.profiler_,
+                                       static_cast<size_t>(src->profile_idx), 0);
+                source_result = src->GetData(*source_state_, input_chunk_, ctx_);
+                g.SetRowsOut(static_cast<int64_t>(input_chunk_.count));
+            } else {
+                source_result = src->GetData(*source_state_, input_chunk_, ctx_);
+            }
+        }
 
         if (source_result == OperatorResultType::FINISHED &&
             input_chunk_.count == 0) {
@@ -32,7 +44,15 @@ void PipelineExecutor::Execute() {
         // No intermediate operators: send directly to sink.
         if (pipeline_.operators.empty()) {
             if (input_chunk_.count > 0) {
-                pipeline_.sink->Consume(input_chunk_, *sink_state_, ctx_);
+                PhysicalOperator* snk = pipeline_.sink;
+                if (ctx_.profiler_.IsActive() && snk->profile_idx >= 0) {
+                    OperatorProfileGuard g(ctx_.profiler_,
+                                           static_cast<size_t>(snk->profile_idx),
+                                           static_cast<int64_t>(input_chunk_.count));
+                    snk->Consume(input_chunk_, *sink_state_, ctx_);
+                } else {
+                    snk->Consume(input_chunk_, *sink_state_, ctx_);
+                }
             }
             if (source_result == OperatorResultType::FINISHED) {
                 TryFlushOperators();
@@ -49,13 +69,38 @@ void PipelineExecutor::Execute() {
 
             while (!inner_done) {
                 output_chunk_.Reset();
-                auto op_result = pipeline_.operators[i]->Execute(
-                    *current_input, output_chunk_, *op_states_[i], ctx_);
+                OperatorResultType op_result;
+                {
+                    PhysicalOperator* op = pipeline_.operators[i];
+                    if (ctx_.profiler_.IsActive() && op->profile_idx >= 0) {
+                        OperatorProfileGuard g(ctx_.profiler_,
+                                               static_cast<size_t>(op->profile_idx),
+                                               static_cast<int64_t>(current_input->count));
+                        op_result = op->Execute(*current_input, output_chunk_,
+                                                *op_states_[i], ctx_);
+                        g.SetRowsOut(static_cast<int64_t>(output_chunk_.count));
+                    } else {
+                        op_result = op->Execute(*current_input, output_chunk_,
+                                                *op_states_[i], ctx_);
+                    }
+                }
+
+                auto consume_to_sink = [&](const DataChunk& chunk) {
+                    PhysicalOperator* snk = pipeline_.sink;
+                    if (ctx_.profiler_.IsActive() && snk->profile_idx >= 0) {
+                        OperatorProfileGuard g(ctx_.profiler_,
+                                               static_cast<size_t>(snk->profile_idx),
+                                               static_cast<int64_t>(chunk.count));
+                        snk->Consume(chunk, *sink_state_, ctx_);
+                    } else {
+                        snk->Consume(chunk, *sink_state_, ctx_);
+                    }
+                };
 
                 if (op_result == OperatorResultType::FINISHED) {
                     // e.g. PhysicalLimit hit its row cap — flush last output then stop.
                     if (output_chunk_.count > 0) {
-                        pipeline_.sink->Consume(output_chunk_, *sink_state_, ctx_);
+                        consume_to_sink(output_chunk_);
                     }
                     pipeline_.sink->Finalize(*sink_state_, ctx_);
                     return;
@@ -79,7 +124,7 @@ void PipelineExecutor::Execute() {
                             if (stage_out == &output_chunk_) stage_out = &buf_y;
                         }
                         if (stage_in->count > 0) {
-                            pipeline_.sink->Consume(*stage_in, *sink_state_, ctx_);
+                            consume_to_sink(*stage_in);
                         }
                     }
                     skip_to_next_source = true;
@@ -99,7 +144,7 @@ void PipelineExecutor::Execute() {
                 } else {
                     // Last operator before sink.
                     if (output_chunk_.count > 0) {
-                        pipeline_.sink->Consume(output_chunk_, *sink_state_, ctx_);
+                        consume_to_sink(output_chunk_);
                     }
                     // HAVE_MORE_OUTPUT: call this operator again with the same input.
                     // inner_done stays false → inner loop continues.

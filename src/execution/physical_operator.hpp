@@ -20,6 +20,7 @@ struct PhysicalOperator {
     std::vector<TypeId>      output_types;
     std::vector<std::string> output_names;
     std::vector<std::unique_ptr<PhysicalOperator>> children;
+    int                      profile_idx = -1; // -1 = unregistered
 
     virtual ~PhysicalOperator() = default;
 

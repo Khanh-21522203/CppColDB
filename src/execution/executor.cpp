@@ -7,8 +7,43 @@
 #include <unordered_set>
 #include <stdexcept>
 #include <functional>
+#include <typeinfo>
+#include <cxxabi.h>
+#include <cstdlib>
 
 namespace cppcoldb {
+
+// ---------------------------------------------------------------------------
+// Operator name demangling
+// ---------------------------------------------------------------------------
+static std::string DemangledName(const char* mangled) {
+    int   status    = 0;
+    char* demangled = abi::__cxa_demangle(mangled, nullptr, nullptr, &status);
+    std::string result = (status == 0 && demangled) ? demangled : mangled;
+    if (demangled) std::free(demangled);
+    // Strip namespace prefix: take the part after the last "::".
+    auto pos = result.rfind("::");
+    if (pos != std::string::npos) result = result.substr(pos + 2);
+    return result;
+}
+
+// DFS over the operator tree, registering every operator with the profiler.
+// Mirrors BuildPipelines' handling of hidden children (build_op, source_op).
+static void RegisterOperators(PhysicalOperator* op, QueryProfiler& profiler) {
+    if (!op) return;
+    op->profile_idx = static_cast<int>(
+        profiler.RegisterOperator(DemangledName(typeid(*op).name())));
+    for (auto& child : op->children) {
+        RegisterOperators(child.get(), profiler);
+    }
+    // Hidden children not in op->children:
+    if (auto* probe = dynamic_cast<PhysicalHashJoinProbe*>(op)) {
+        RegisterOperators(probe->build_op.get(), profiler);
+    }
+    if (auto* agg = dynamic_cast<PhysicalHashAggregation*>(op)) {
+        RegisterOperators(agg->source_op.get(), profiler);
+    }
+}
 
 Executor::Executor(ClientContext& ctx) : ctx_(ctx) {}
 
@@ -101,6 +136,11 @@ std::vector<Pipeline*> Executor::TopologicalSort() {
 }
 
 void Executor::Execute() {
+    // Register all operators with the profiler before running any pipeline.
+    if (ctx_.profiler_.IsActive()) {
+        RegisterOperators(plan_.get(), ctx_.profiler_);
+    }
+
     auto ordered = TopologicalSort();
     for (Pipeline* p : ordered) {
         PipelineExecutor pe(ctx_, *p);

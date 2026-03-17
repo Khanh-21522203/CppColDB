@@ -1,4 +1,4 @@
-# Phase 9 — Database Bootstrap
+# Phase 10 — Query Profiler
 
 ## Status Legend
 - [ ] not started
@@ -7,136 +7,57 @@
 
 ---
 
-## Part A: TaskScheduler (no new deps)
+## Implementation Order
 
-- [ ] Create `src/parallel/task.hpp` — `Task` abstract base (Execute(), ~Task)
-- [ ] Create `src/parallel/task_scheduler.hpp/cpp` — thread pool
-  - `Initialize(num_threads)`: spawn worker threads
-  - `Submit(unique_ptr<Task>)`: enqueue + notify_one
-  - `WorkerLoop()`: condition-variable wait → dequeue → Execute
-  - `Shutdown()`: set shutdown flag → notify_all → join all threads
-
-## Part B: Catalog Serialization (needed by CheckpointManager)
-
-- [ ] Add `Catalog::Serialize(uint8_t* block, size_t block_size)` — write schema/table/column/segment metadata to a raw block buffer
-  - WriteUInt32 / WriteString / WriteTypeId helpers as free functions
-  - Format: schema_count → [schema_name, table_count → [table_name, col_count → [col_name, type], rg_count → [rg_row_count, col_chunk_count → [seg_count → [block_id, compression, row_count]]]]]
-- [ ] Add `Catalog::Deserialize(const uint8_t* block, size_t block_size, Transaction& sys_tx)` — reconstruct catalog + RowGroup metadata from block buffer
-  - ReadUInt32 / ReadString / ReadTypeId helpers
-  - Calls `CreateTable` with pre-existing row_group metadata (no data loaded yet — segments load lazily from BlockFile)
-
-## Part C: CheckpointManager
-
-- [ ] Create `src/checkpoint/checkpoint_manager.hpp/cpp`
-  - Constructor takes `Catalog&`, `BufferManager&`, `WAL&`, `BlockFile&`
-  - `CreateCheckpoint()`:
-    1. try_lock checkpoint_lock_ → return false if busy
-    2. `wal_.WriteCheckpointMarker()` + `wal_.Flush()`
-    3. Pin block 0 from BlockFile, call `catalog_.Serialize(...)`, mark dirty
-    4. Flush all ColumnChunk segments via `bm_.Flush()`
-    5. `block_file_.Sync()`
-    6. `wal_.Truncate()`
-  - `ScheduleAsyncCheckpoint(TaskScheduler&)` — submit `AsyncCheckpointTask`
-  - `AsyncCheckpointTask : Task` defined in same file
-
-## Part D: ClientContext upgrade
-
-- [ ] Upgrade `src/main/client_context.hpp` from thin struct to query-driving class:
-  - Keep `Catalog* catalog` and `Transaction* transaction` fields (operators still use them)
-  - Add `QueryResult Query(const std::string& sql)` — runs full Parser→Binder→Optimizer→PhysicalPlanner→Executor pipeline
-  - Backward compatible: existing operator code that reads ctx.catalog / ctx.transaction still works
-
-## Part E: Connection + Database
-
-- [ ] Create `src/main/connection.hpp/cpp`
-  - Holds ref to `Database&` + `ClientContext` + optional `shared_ptr<Transaction>` (for explicit txns)
-  - `Query(sql)`: auto-begin txn → run ctx.Query(sql) → auto-commit (or rollback on throw)
-  - `Begin()` / `Commit()` / `Rollback()`: explicit transaction control
-  - Destructor: rollback active txn, deregister from Database
-- [ ] Create `src/main/database.hpp/cpp`
-  - **In-memory mode** (`":memory:"`): constructs BufferManager (no file), null WAL, Catalog, TransactionManager, TaskScheduler; no CheckpointManager
-  - **Persistent mode**: open/create BlockFile + WAL; if block 0 exists → `Catalog::Deserialize`; if WAL non-empty → `ReplayWAL()` → re-checkpoint
-  - `Connect()` → returns `unique_ptr<Connection>`
-  - Destructor: rollback open txns, flush WAL, final checkpoint, shutdown scheduler
-  - `ReplayWAL()`: reads WAL entries past last checkpoint marker, re-applies them (CREATE_TABLE, INSERT, DROP_TABLE)
-
-## Part F: SQL REPL
-
-- [ ] Create `main.cpp`:
-  - Opens `Database` at path from argv[1] (or `":memory:"` if no arg)
-  - Read-eval-print loop: `std::getline` → `conn.Query(line)` → print result rows
-  - Print column headers on first row of each result
-  - Handle empty lines, semicolons, `exit` / `quit` commands
-  - Print errors without crashing
-
-## Part G: Tests + CMakeLists.txt
-
-- [ ] Create `test/integration/test_database.cpp`:
-  - `TestInMemoryBasic`: create table, insert, select → correct rows
-  - `TestInMemoryMultiStatement`: create + insert + select in sequence
-  - `TestInMemoryJoin`: two tables, JOIN query → correct result
-  - `TestInMemoryAggregation`: GROUP BY query → correct aggregation
-  - `TestInMemoryExplicitTransaction`: BEGIN → insert → COMMIT → visible
-  - `TestInMemoryRollback`: BEGIN → insert → ROLLBACK → not visible
-  - `TestPersistentCreateAndReopen`: session 1 creates table + inserts; session 2 reopens → rows visible
-  - `TestPersistentWALReplay`: session 1 inserts (no explicit checkpoint); crash-simulate (skip destructor checkpoint); session 2 reopens → WAL replayed, data visible
-  - `TestMultipleConnections`: two connections to same in-memory db; each inserts → both visible after commit
-  - `TestConnectionRollbackOnClose`: open connection, BEGIN, insert, destroy without commit → not visible
-- [ ] Create `test/integration/test_phase9_main.cpp` — entry point calling all tests
-- [ ] Update `CMakeLists.txt`:
-  - Add `src/parallel/task_scheduler.cpp`, `src/checkpoint/checkpoint_manager.cpp`, `src/main/database.cpp`, `src/main/connection.cpp` to `cppcoldb_lib`
-  - Add `main.cpp` → `cppcoldb` executable
-  - Add `add_phase_tests(test_phase9 ...)` for integration tests
-- [ ] Build and run: `./build/test_phase9` — all green
-- [ ] Build and run REPL: `./build/cppcoldb` — interactive SQL prompt
+- [ ] Create `src/profiler/profiling_result.hpp` — POD structs only (PhaseProfile, OperatorProfile, ProfilingResult + ToString())
+- [ ] Create `src/profiler/query_profiler.hpp` — QueryProfiler class declaration + QueryPhase enum
+- [ ] Create `src/profiler/query_profiler.cpp` — all method implementations
+- [ ] Create `src/profiler/operator_profiler.hpp` — OperatorProfileGuard RAII, header-only
+- [ ] Modify `src/execution/physical_result_collector.hpp` — add `std::optional<ProfilingResult>` to QueryResult
+- [ ] Modify `src/execution/physical_operator.hpp` — add `int profile_idx = -1`
+- [ ] Modify `src/main/client_context.hpp` — add `QueryProfiler profiler_`, `bool profiling_enabled_`
+- [ ] Modify `src/main/client_context.cpp` — wrap phases, handle EXPLAIN ANALYZE
+- [ ] Modify `src/execution/executor.cpp` — add RegisterOperators tree walker
+- [ ] Modify `src/execution/pipeline_executor.cpp` — wrap operator calls with OperatorProfileGuard
+- [ ] Update `CMakeLists.txt` — uncomment test_phase10 target
+- [ ] Create `test/profiler/test_phase10_main.cpp`
+- [ ] Create `test/profiler/test_query_profiler.cpp` — 11 tests
+- [ ] Build and run: all 11 tests green
 
 ---
 
 ## Design Decisions
 
-- **Backward compatibility**: keep `ClientContext` as a plain-accessible struct (catalog*, transaction*) — operators never change. `Query()` is an additive method.
-- **WAL replay scope**: replay only `WAL_CREATE_TABLE`, `WAL_INSERT`, `WAL_DROP_TABLE`. UPDATE/DELETE replay deferred (complex; not exercised by Phase 9 tests).
-- **CheckpointManager owns BlockFile ref**: `Database` passes `*block_file_` in persistent mode; in-memory `Database` constructs no `CheckpointManager`.
-- **In-memory BufferManager**: pass `nullptr` as `BlockFile*` to `BufferManager` — existing impl already handles this.
-- **TaskScheduler in both modes**: spawn 1 worker thread regardless of persistence mode (needed for async checkpoint in persistent mode, no-op cost in memory mode).
-- **Auto-commit**: `Connection::Query()` wraps each statement in its own transaction. `Begin()`/`Commit()`/`Rollback()` disable auto-commit for that session.
+- **Header split**: `profiling_result.hpp` (POD structs, no `<chrono>`) + `query_profiler.hpp` (full class + `<chrono>`) → `physical_result_collector.hpp` only includes the lightweight one
+- **Profiler in ClientContext**: value member `QueryProfiler profiler_` — no threads, no locking needed
+- **Operator registration**: tree walk in `Executor::Execute()` before pipeline loop, mirrors BuildPipelines special-child handling
+- **EXPLAIN ANALYZE**: detected in `ClientContext::Query` before binding; inner stmt bound/run with profiling on; result returned as single-column "QUERY PLAN" VARCHAR
+- **Zero-overhead when off**: all hot paths check `ctx_.profiler_.IsActive()` (single bool read) before creating guard
+- **profile_idx = -1**: unregistered operators (PhysicalResultCollector) silently skipped in PipelineExecutor
 
 ## Critical Traps
 
-1. **Catalog::Deserialize creates tables without normal transaction flow** — use a system transaction (tx_id=0, commit_time=1) so newly-deserialized entries are visible to all subsequent transactions.
-2. **ColumnChunk segments loaded lazily** — `Deserialize` only recreates metadata (block_id, compression, row_count). Actual data is read from BlockFile by `ColumnChunk::Scan()` on first access. Don't try to pre-load data.
-3. **WAL replay order matters** — entries must be applied in the order they were written. `ReadNextEntry` reads forward; check WAL_CHECKPOINT marker position and skip entries before it.
-4. **Database destructor order** — shut down TaskScheduler FIRST (it holds refs to CheckpointManager which holds refs to WAL/BufferManager), then flush WAL, then checkpoint, then close BlockFile.
-5. **Connection deregisters from Database on destruction** — use a raw pointer list in Database (not weak_ptr) since Connection lifetime is caller-controlled and Database outlives all connections.
+1. **`profiling_enabled_` not restored on exception** — use RAII cleanup struct or try/catch reset in both paths
+2. **EXPLAIN ANALYZE inner stmt binding** — use `explain->inner.get()` (raw ref), never `.release()` or `.move()`
+3. **Phase ordering**: start profiler BEFORE parse so PARSE phase gets timed; for EXPLAIN ANALYZE retroactively emit a 0-duration PARSE phase for the inner statement
+4. **`RegisterOperators` must mirror `BuildPipelines`** for hidden children: `PhysicalHashJoinProbe::build_op` and `PhysicalHashAggregation::source_op` are NOT in `children`
+5. **`TestProfilerOperatorRowCounts`** must use a filter query (not aggregation) since TryFlush path bypasses profiler guards
 
 ---
 
 ## Review (completed 2026-03-18)
 
-**Status: All 8 integration tests pass. Full suite 10/10.**
+**Status: All 11 tests pass. Full suite 11/11.**
 
-### What was implemented
-- **Part A**: `TaskScheduler` + `Task` base — thread pool with condition variable, `Submit`/`Initialize`/`Shutdown`
-- **Part B**: `Catalog::Serialize/Deserialize` — little-endian block format for schema/table/column/segment metadata
-- **Part C**: `CheckpointManager` — `CreateCheckpoint()` (WAL marker → catalog serialize → `bm_.Flush()` → `wal_.Truncate()`), `ScheduleAsyncCheckpoint`
-- **Part D**: `ClientContext` upgraded — `Query(sql)` drives full parse→bind→optimize→plan→execute pipeline
-- **Part E**: `Connection` + `Database` — in-memory and persistent modes, `ReplayWAL()`, `RegisterConnection`/`UnregisterConnection`
-- **Part F**: `main.cpp` SQL REPL
-- **Part G**: Integration tests (8 tests) + CMakeLists.txt update
+### What was built
+- `src/profiler/profiling_result.hpp` — POD structs (`PhaseProfile`, `OperatorProfile`, `ProfilingResult`) + `ToString()`; lightweight include with no `<chrono>`
+- `src/profiler/query_profiler.hpp/cpp` — `QueryProfiler` class with `StartQuery`/`StartPhase`/`EndPhase`/`EndQuery`/`RegisterOperator`/`RecordOperatorCall`; zero-overhead when `!active_`
+- `src/profiler/operator_profiler.hpp` — `OperatorProfileGuard` RAII (header-only)
+- `PhysicalOperator` — added `int profile_idx = -1` field
+- `ClientContext` — added `QueryProfiler profiler_`, `bool profiling_enabled_`; RAII `ProfRestore` struct for exception-safe flag reset
+- `ClientContext::Query` — phase timing with START/END around each pipeline stage; `EXPLAIN ANALYZE` intercept before binding; returns plan text as single-column QueryResult
+- `Executor::Execute` — `RegisterOperators()` DFS walker with `abi::__cxa_demangle` for readable names; mirrors `BuildPipelines` special-child handling for join/aggregation
+- `PipelineExecutor` — `OperatorProfileGuard` wraps source `GetData`, operator `Execute`, and sink `Consume` calls; uses `consume_to_sink` lambda to deduplicate sink wrapping
 
-### Bug found during Phase 9 implementation
-- **INSERT not implemented in physical planner** — `PlanInsert` threw `RuntimeError`. Fixed by:
-  1. Adding `DataChunk rows` field to `LogicalInsert`
-  2. Evaluating VALUES literals in `BindInsert` into the `DataChunk` (with type coercion)
-  3. Creating `PhysicalInsert` as a SOURCE operator that calls `RowGroup::Append()` and pushes `InsertUndoEntry`
-  4. Implementing `PlanInsert` in `PhysicalPlanner`
-
-### Tests written
-- `TestInMemoryBasic` — create/insert/select
-- `TestInMemoryMultiStatement` — 5 sequential inserts
-- `TestInMemoryAggregation` — GROUP BY + SUM
-- `TestInMemoryJoin` — inner join across two tables
-- `TestInMemoryExplicitTransaction` — BEGIN/COMMIT
-- `TestInMemoryRollback` — BEGIN/ROLLBACK → rolled-back rows not visible
-- `TestConnectionRollbackOnClose` — auto-rollback on Connection destruction
-- `TestErrorHandling` — error returns success=false; connection stays usable after error
+### Adjustment: predicate pushdown + scan filtering
+`TestProfilerOperatorRowCounts` was initially written expecting `PhysicalFilter` to appear (rows_in=10, rows_out=5 with WHERE id > 5). The optimizer pushes predicates into `LogicalGet.pushed_filters` and removes the `LogicalFilter` node — the physical plan has only `PhysicalProjection → PhysicalTableScan`. Test adjusted to check `PhysicalProjection` rows_in/out == 10 (full table scan).
