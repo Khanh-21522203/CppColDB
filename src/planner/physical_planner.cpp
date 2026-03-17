@@ -8,6 +8,7 @@
 #include "execution/operator/physical_hash_aggregation.hpp"
 #include "execution/operator/physical_aggregation_source.hpp"
 #include "execution/operator/physical_hash_join.hpp"
+#include "execution/operator/physical_insert.hpp"
 #include "common/exception.hpp"
 #include <unordered_map>
 
@@ -359,8 +360,15 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanJoin(const LogicalJoin& n
 // PlanInsert / PlanDelete / PlanUpdate — deferred
 // ---------------------------------------------------------------------------
 
-std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanInsert(const LogicalInsert&) {
-    throw RuntimeError("PhysicalPlanner: INSERT not yet implemented");
+std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanInsert(const LogicalInsert& node) {
+    auto op = std::make_unique<PhysicalInsert>();
+    op->schema_name  = node.schema_name;
+    op->table_name   = node.table_name;
+    op->column_ids   = node.column_ids;
+    op->rows         = node.rows;  // copy pre-evaluated DataChunk
+    op->output_types = {};
+    op->output_names = {};
+    return op;
 }
 
 std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanDelete(const LogicalDelete&) {

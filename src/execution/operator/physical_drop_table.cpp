@@ -3,6 +3,7 @@
 #include "main/client_context.hpp"
 #include "catalog/catalog.hpp"
 #include "transaction/transaction.hpp"
+#include "transaction/undo_buffer.hpp"
 #include "common/exception.hpp"
 
 namespace cppcoldb {
@@ -23,15 +24,30 @@ OperatorResultType PhysicalDropTable::GetData(OperatorState& raw_state,
     if (!ctx.catalog || !ctx.transaction) {
         throw RuntimeError("ClientContext missing catalog/transaction for DROP TABLE");
     }
+
+    bool dropped = false;
     if (!if_exists) {
         ctx.catalog->DropTable(schema_name, table_name, *ctx.transaction);
+        dropped = true;
     } else {
         try {
             ctx.catalog->DropTable(schema_name, table_name, *ctx.transaction);
+            dropped = true;
         } catch (const CppColDBException&) {
             // table does not exist — silently ignore
         }
     }
+
+    // Register in undo buffer so TransactionManager::Commit calls catalog_.CommitEntry,
+    // which sets delete_commit_time and makes the drop visible to future transactions.
+    if (dropped) {
+        CatalogUndoEntry ue;
+        ue.schema     = schema_name;
+        ue.table      = table_name;
+        ue.was_create = false;
+        ctx.transaction->undo_buffer.PushCatalogEntry(std::move(ue));
+    }
+
     return OperatorResultType::FINISHED;
 }
 

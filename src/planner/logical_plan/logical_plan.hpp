@@ -159,6 +159,7 @@ struct LogicalInsert : LogicalPlan {
     std::string         schema_name;
     std::string         table_name;
     std::vector<size_t> column_ids;  // target column indices in table order
+    DataChunk           rows;        // pre-evaluated literal values to insert
 };
 
 // children[0] is LogicalFilter(LogicalGet) — identifies rows to delete.

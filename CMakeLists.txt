@@ -111,10 +111,10 @@ add_phase_tests(test_phase8
 )
 
 # Phase 9 — Database bootstrap
-# add_phase_tests(test_phase9
-#     test/main/test_database.cpp
-#     test/integration/test_end_to_end.cpp
-# )
+add_phase_tests(test_phase9
+    test/integration/test_phase9_main.cpp
+    test/integration/test_database.cpp
+)
 
 # Phase 10 — Query profiler
 # add_phase_tests(test_phase10

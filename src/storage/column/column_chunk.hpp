@@ -41,6 +41,10 @@ public:
     size_t              SegmentRowCount() const;
     const SegmentStats& Stats()           const { return combined_stats_; }
 
+    // For checkpoint serialization / deserialization.
+    const std::vector<ColumnSegment>& Segments()           const { return segments_; }
+    void AddSegment(ColumnSegment seg) { segments_.push_back(std::move(seg)); }
+
 private:
     void UpdateCombinedStats(const DataVector& vec, size_t count);
 

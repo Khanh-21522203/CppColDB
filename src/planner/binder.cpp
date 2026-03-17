@@ -224,8 +224,34 @@ std::unique_ptr<LogicalPlan> Binder::BindInsert(const InsertStatement& stmt) {
         }
     }
 
-    // Validate each row
+    // Build a DataChunk from the literal VALUES rows.
     BindContext empty_ctx; // no columns — values must be literals
+
+    // Collect target column types.
+    std::vector<TypeId> col_types;
+    col_types.reserve(column_ids.size());
+    for (size_t col_id : column_ids) {
+        col_types.push_back(table->columns[col_id].type);
+    }
+
+    DataChunk rows;
+    rows.Initialize(col_types);
+    rows.count = stmt.values.size();
+
+    // Resize each column vector to hold the rows.
+    for (size_t c = 0; c < col_types.size(); ++c) {
+        auto& vec = rows.columns[c];
+        TypeId t = col_types[c];
+        if (t == TypeId::VARCHAR) {
+            vec.str_data.resize(stmt.values.size());
+        } else if (t == TypeId::FLOAT32 || t == TypeId::FLOAT64) {
+            vec.float_data.resize(stmt.values.size());
+        } else {
+            vec.int_data.resize(stmt.values.size());
+        }
+        vec.count = stmt.values.size();
+    }
+
     for (size_t row_idx = 0; row_idx < stmt.values.size(); ++row_idx) {
         const auto& row = stmt.values[row_idx];
         if (row.size() != column_ids.size()) {
@@ -235,19 +261,65 @@ std::unique_ptr<LogicalPlan> Binder::BindInsert(const InsertStatement& stmt) {
         }
         for (size_t i = 0; i < row.size(); ++i) {
             auto bound = BindExpr(*row[i], empty_ctx);
-            bool is_null = (bound->kind == LogicalExpr::Kind::LITERAL &&
-                            static_cast<LogicalLit&>(*bound).is_null);
-            TypeId expected = table->columns[column_ids[i]].type;
-            if (!is_null && bound->result_type != expected) {
-                // Allow numeric coercion
-                if (IsNumericType(bound->result_type) && IsNumericType(expected)) {
-                    // coercion is fine; executor handles it
-                } else {
-                    throw BindError("column '" + table->columns[column_ids[i]].name
-                                    + "': cannot assign "
-                                    + TypeName(bound->result_type)
-                                    + " to " + TypeName(expected));
+            TypeId expected = col_types[i];
+            auto& vec = rows.columns[i];
+
+            if (bound->kind == LogicalExpr::Kind::LITERAL) {
+                const auto& lit = static_cast<const LogicalLit&>(*bound);
+                if (lit.is_null) {
+                    vec.SetNull(row_idx);
+                    continue;
                 }
+                vec.validity.set(row_idx);
+                // Store value with numeric coercion as needed.
+                switch (expected) {
+                    case TypeId::BOOLEAN:
+                    case TypeId::INT8:
+                    case TypeId::INT16:
+                    case TypeId::INT32:
+                    case TypeId::INT64:
+                        if (lit.value.type == TypeId::INT64 ||
+                            lit.value.type == TypeId::BOOLEAN) {
+                            vec.int_data[row_idx] = lit.value.GetInt64();
+                        } else if (lit.value.type == TypeId::FLOAT64 ||
+                                   lit.value.type == TypeId::FLOAT32) {
+                            vec.int_data[row_idx] = static_cast<int64_t>(lit.value.GetFloat64());
+                        } else {
+                            throw BindError("column '" + table->columns[column_ids[i]].name
+                                            + "': cannot assign "
+                                            + TypeName(lit.value.type)
+                                            + " to " + TypeName(expected));
+                        }
+                        break;
+                    case TypeId::FLOAT32:
+                    case TypeId::FLOAT64:
+                        if (lit.value.type == TypeId::FLOAT64 ||
+                            lit.value.type == TypeId::FLOAT32) {
+                            vec.float_data[row_idx] = lit.value.GetFloat64();
+                        } else if (IsNumericType(lit.value.type)) {
+                            vec.float_data[row_idx] = static_cast<double>(lit.value.GetInt64());
+                        } else {
+                            throw BindError("column '" + table->columns[column_ids[i]].name
+                                            + "': cannot assign "
+                                            + TypeName(lit.value.type)
+                                            + " to " + TypeName(expected));
+                        }
+                        break;
+                    case TypeId::VARCHAR:
+                        if (lit.value.type == TypeId::VARCHAR) {
+                            vec.str_data[row_idx] = lit.value.GetVarchar();
+                        } else {
+                            throw BindError("column '" + table->columns[column_ids[i]].name
+                                            + "': cannot assign "
+                                            + TypeName(lit.value.type)
+                                            + " to VARCHAR");
+                        }
+                        break;
+                    default:
+                        throw BindError("unsupported column type in INSERT");
+                }
+            } else {
+                throw BindError("INSERT VALUES must contain only literals");
             }
         }
     }
@@ -256,6 +328,7 @@ std::unique_ptr<LogicalPlan> Binder::BindInsert(const InsertStatement& stmt) {
     insert->schema_name = schema_name;
     insert->table_name  = stmt.table_name;
     insert->column_ids  = std::move(column_ids);
+    insert->rows        = std::move(rows);
     return insert;
 }
 

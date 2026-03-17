@@ -34,6 +34,13 @@ public:
     void DropTable(const std::string& schema, const std::string& name,
                    const Transaction& tx);
 
+    // Checkpoint: write catalog metadata to a raw block buffer.
+    void Serialize(uint8_t* block, size_t block_size) const;
+
+    // Checkpoint: reconstruct catalog from block buffer.
+    // Uses a system transaction (always-visible entries).
+    void Deserialize(const uint8_t* block, size_t block_size);
+
     // MVCC lifecycle — called from TransactionManager
     void CommitEntry  (const std::string& schema, const std::string& name,
                        TransactionId tx_id, timestamp_t commit_time);

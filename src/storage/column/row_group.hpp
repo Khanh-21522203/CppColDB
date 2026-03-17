@@ -42,6 +42,11 @@ public:
     size_t       RowCount()    const { return row_count_; }
     VersionInfo& GetVersionInfo()    { return *version_info_; }
 
+    // For checkpoint serialization / deserialization.
+    const std::vector<ColumnChunk>& ColumnChunks() const { return column_chunks_; }
+    std::vector<ColumnChunk>&       ColumnChunks()       { return column_chunks_; }
+    void SetRowCount(size_t n)                           { row_count_ = n; }
+
 private:
     uint32_t                     row_group_id_;
     size_t                       row_count_ = 0;
