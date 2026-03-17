@@ -281,18 +281,24 @@ std::unique_ptr<LogicalPlan> Optimizer::RunConstantFolding(std::unique_ptr<Logic
 static std::unique_ptr<LogicalExpr> CombinePredicates(
     std::vector<std::unique_ptr<LogicalExpr>>& pending) {
     if (pending.empty()) return nullptr;
-    if (pending.size() == 1) return std::move(pending[0]);
 
-    // Chain into AND tree (left-associative)
-    auto result = std::move(pending[0]);
-    for (size_t i = 1; i < pending.size(); ++i) {
-        auto and_node       = std::make_unique<LogicalBinaryOp>();
-        and_node->op        = "AND";
-        and_node->result_type = TypeId::BOOLEAN;
-        and_node->left      = std::move(result);
-        and_node->right     = std::move(pending[i]);
-        result = std::move(and_node);
+    std::unique_ptr<LogicalExpr> result;
+    if (pending.size() == 1) {
+        result = std::move(pending[0]);
+    } else {
+        // Chain into AND tree (left-associative)
+        result = std::move(pending[0]);
+        for (size_t i = 1; i < pending.size(); ++i) {
+            auto and_node         = std::make_unique<LogicalBinaryOp>();
+            and_node->op          = "AND";
+            and_node->result_type = TypeId::BOOLEAN;
+            and_node->left        = std::move(result);
+            and_node->right       = std::move(pending[i]);
+            result = std::move(and_node);
+        }
     }
+    // Clear pending so callers see an empty vector (not a vector of moved-from nulls).
+    pending.clear();
     return result;
 }
 
@@ -334,7 +340,23 @@ std::unique_ptr<LogicalPlan> Optimizer::Pushdown(
         }
 
         default: {
-            // For Projection, Limit, Sort, Aggregate: recurse into children
+            // For Projection, Limit, Sort, Aggregate, Join: recurse into children.
+            // For AGGREGATE and JOIN, stop pushing predicates past the boundary
+            // (predicates referencing post-agg columns cannot be pushed below the agg).
+            if (node->node_type == LogicalPlan::Type::AGGREGATE ||
+                node->node_type == LogicalPlan::Type::JOIN) {
+                // Don't push predicates across agg/join boundaries.
+                if (!pending.empty()) {
+                    auto combined = CombinePredicates(pending);
+                    auto new_filter = std::make_unique<LogicalFilter>();
+                    new_filter->predicate    = std::move(combined);
+                    new_filter->output_types = node->output_types;
+                    new_filter->output_names = node->output_names;
+                    new_filter->children.push_back(std::move(node));
+                    return new_filter;
+                }
+                return node;
+            }
             for (auto& child : node->children) {
                 child = Pushdown(std::move(child), pending);
             }
@@ -462,12 +484,34 @@ std::unique_ptr<LogicalPlan> Optimizer::PruneColumns(
         }
 
         case LogicalPlan::Type::LIMIT:
-        case LogicalPlan::Type::SORT:
-        case LogicalPlan::Type::AGGREGATE: {
+        case LogicalPlan::Type::SORT: {
             // Pass required_cols through unchanged
             for (auto& child : plan->children) {
                 child = PruneColumns(std::move(child), required_cols);
             }
+            return plan;
+        }
+
+        case LogicalPlan::Type::AGGREGATE: {
+            // Column pruning must transition from post-agg to pre-agg column refs.
+            // Collect column refs from the aggregate's group and aggr expressions —
+            // these reference the pre-aggregate input columns.
+            std::set<size_t> pre_agg_required;
+            auto& agg = static_cast<LogicalAggregate&>(*plan);
+            for (const auto& ge : agg.group_exprs) {
+                if (ge) CollectColumnRefs(*ge, pre_agg_required);
+            }
+            for (const auto& ae : agg.aggr_exprs) {
+                if (ae) CollectColumnRefs(*ae, pre_agg_required);
+            }
+            for (auto& child : plan->children) {
+                child = PruneColumns(std::move(child), pre_agg_required);
+            }
+            return plan;
+        }
+
+        case LogicalPlan::Type::JOIN: {
+            // Do not attempt column pruning across JOIN nodes in Phase 8.
             return plan;
         }
 

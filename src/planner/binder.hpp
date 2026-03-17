@@ -19,7 +19,8 @@ public:
 
 private:
     // Statement binders
-    std::unique_ptr<LogicalPlan> BindSelect     (const SelectStatement&      stmt);
+    std::unique_ptr<LogicalPlan> BindSelect        (const SelectStatement&      stmt);
+    std::unique_ptr<LogicalPlan> BindSelectWithJoin(const SelectStatement&      stmt);
     std::unique_ptr<LogicalPlan> BindInsert      (const InsertStatement&      stmt);
     std::unique_ptr<LogicalPlan> BindUpdate      (const UpdateStatement&      stmt);
     std::unique_ptr<LogicalPlan> BindDelete      (const DeleteStatement&      stmt);
@@ -48,6 +49,13 @@ private:
     bool IsNumericType(TypeId t) const;
     bool IsIntegerType(TypeId t) const;
     bool IsComparisonOp(const std::string& op) const;
+
+    // Aggregation helpers
+    bool HasAggregateExpr(const Expr& e) const;
+    std::unique_ptr<LogicalPlan> BindAggregateSelect(
+        const SelectStatement& stmt,
+        const BindContext& pre_agg_ctx,
+        std::unique_ptr<LogicalPlan> scan_filter);
 
     Catalog&     catalog_;
     Transaction& tx_;

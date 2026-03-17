@@ -85,6 +85,7 @@ struct LogicalPlan {
         LIMIT,
         SORT,
         AGGREGATE,
+        JOIN,
         INSERT,
         DELETE,
         UPDATE,
@@ -139,6 +140,17 @@ struct LogicalAggregate : LogicalPlan {
     LogicalAggregate() { node_type = Type::AGGREGATE; }
     std::vector<std::unique_ptr<LogicalExpr>> group_exprs;
     std::vector<std::unique_ptr<LogicalExpr>> aggr_exprs;
+};
+
+// Two-table INNER JOIN:
+//   children[0] = left (probe) subtree
+//   children[1] = right (build) subtree
+//   output_types/names = left_types + right_types (set by binder)
+struct LogicalJoin : LogicalPlan {
+    LogicalJoin() { node_type = Type::JOIN; }
+    std::unique_ptr<LogicalExpr> condition;       // full ON-clause expression
+    std::vector<size_t>          left_key_col_ids;  // equi-join key positions in left output
+    std::vector<size_t>          right_key_col_ids; // equi-join key positions in right output
 };
 
 // children[0] is a LogicalProjection that produces the rows to insert.

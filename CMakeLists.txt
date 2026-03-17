@@ -104,10 +104,11 @@ add_phase_tests(test_phase7
 )
 
 # Phase 8 — Advanced operators
-# add_phase_tests(test_phase8
-#     test/execution/test_aggregation.cpp
-#     test/execution/test_join.cpp
-# )
+add_phase_tests(test_phase8
+    test/execution/test_phase8_main.cpp
+    test/execution/test_aggregation.cpp
+    test/execution/test_join.cpp
+)
 
 # Phase 9 — Database bootstrap
 # add_phase_tests(test_phase9

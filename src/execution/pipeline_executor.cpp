@@ -62,10 +62,25 @@ void PipelineExecutor::Execute() {
                 }
 
                 if (op_result == OperatorResultType::NEED_MORE_INPUT) {
-                    // Operator is done with this input chunk (output may or may not
-                    // have been produced). Fetch the next source chunk.
+                    // Operator is done with this input chunk. Chain output through
+                    // remaining downstream operators before sending to sink (mirrors
+                    // TryFlushOperators — fixes bypass when probe precedes projection).
                     if (output_chunk_.count > 0) {
-                        pipeline_.sink->Consume(output_chunk_, *sink_state_, ctx_);
+                        // Use two alternating buffers so we never reset the live input.
+                        DataChunk  buf_x, buf_y;
+                        DataChunk* stage_in  = &output_chunk_;
+                        DataChunk* stage_out = &buf_x;
+                        for (size_t j = i + 1; j < pipeline_.operators.size(); ++j) {
+                            stage_out->Reset();
+                            pipeline_.operators[j]->Execute(
+                                *stage_in, *stage_out, *op_states_[j], ctx_);
+                            std::swap(stage_in, stage_out);
+                            // Don't overwrite output_chunk_; redirect to the spare buf.
+                            if (stage_out == &output_chunk_) stage_out = &buf_y;
+                        }
+                        if (stage_in->count > 0) {
+                            pipeline_.sink->Consume(*stage_in, *sink_state_, ctx_);
+                        }
                     }
                     skip_to_next_source = true;
                     inner_done = true;

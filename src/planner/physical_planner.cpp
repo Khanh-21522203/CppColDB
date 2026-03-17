@@ -5,23 +5,34 @@
 #include "execution/operator/physical_limit.hpp"
 #include "execution/operator/physical_create_table.hpp"
 #include "execution/operator/physical_drop_table.hpp"
+#include "execution/operator/physical_hash_aggregation.hpp"
+#include "execution/operator/physical_aggregation_source.hpp"
+#include "execution/operator/physical_hash_join.hpp"
 #include "common/exception.hpp"
 #include <unordered_map>
 
 namespace cppcoldb {
 
 // ---------------------------------------------------------------------------
-// Helper: walk the plan tree to find the first LogicalGet node
+// Helper: try to find a LogicalGet node; nullptr if none (JOIN/AGGREGATE child)
 // ---------------------------------------------------------------------------
 
-static const LogicalGet& FindLogicalGet(const LogicalPlan& plan) {
+const LogicalGet* PhysicalPlanner::TryFindLogicalGet(const LogicalPlan& plan) {
     if (plan.node_type == LogicalPlan::Type::GET) {
-        return static_cast<const LogicalGet&>(plan);
+        return static_cast<const LogicalGet*>(&plan);
+    }
+    // Don't recurse into AGGREGATE or JOIN children — they have their own output schema.
+    if (plan.node_type == LogicalPlan::Type::AGGREGATE ||
+        plan.node_type == LogicalPlan::Type::JOIN) {
+        return nullptr;
     }
     for (const auto& child : plan.children) {
-        if (child) return FindLogicalGet(*child);
+        if (child) {
+            const LogicalGet* g = TryFindLogicalGet(*child);
+            if (g) return g;
+        }
     }
-    throw RuntimeError("PhysicalPlanner: no LogicalGet found in plan");
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +70,9 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanNode(const LogicalPlan& p
         case LogicalPlan::Type::DROP_TABLE:
             return PlanDropTable(static_cast<const LogicalDropTable&>(plan));
         case LogicalPlan::Type::AGGREGATE:
-            throw RuntimeError("PhysicalPlanner: aggregate not yet implemented — Phase 8");
+            return PlanAggregate(static_cast<const LogicalAggregate&>(plan));
+        case LogicalPlan::Type::JOIN:
+            return PlanJoin(static_cast<const LogicalJoin&>(plan));
         default:
             throw RuntimeError("PhysicalPlanner: unknown logical plan node type");
     }
@@ -141,14 +154,18 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanGet(const LogicalGet& nod
 // ---------------------------------------------------------------------------
 
 std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanFilter(const LogicalFilter& node) {
-    const LogicalGet& get = FindLogicalGet(node);
+    const LogicalGet* get = TryFindLogicalGet(node);
 
     auto child = PlanNode(*node.children[0]);
 
     auto op = std::make_unique<PhysicalFilter>();
-    op->predicate = node.predicate
-        ? RemapColumnRefs(CloneExpr(*node.predicate), get.column_ids)
-        : nullptr;
+    if (node.predicate) {
+        if (get) {
+            op->predicate = RemapColumnRefs(CloneExpr(*node.predicate), get->column_ids);
+        } else {
+            op->predicate = CloneExpr(*node.predicate);
+        }
+    }
     op->output_types = node.output_types;
     op->output_names = node.output_names;
     op->children.push_back(std::move(child));
@@ -162,14 +179,18 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanFilter(const LogicalFilte
 std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanProjection(
     const LogicalProjection& node) {
 
-    const LogicalGet& get = FindLogicalGet(node);
+    const LogicalGet* get = TryFindLogicalGet(node);
 
     auto child = PlanNode(*node.children[0]);
 
     auto op = std::make_unique<PhysicalProjection>();
     for (const auto& e : node.exprs) {
         if (e) {
-            op->exprs.push_back(RemapColumnRefs(CloneExpr(*e), get.column_ids));
+            if (get) {
+                op->exprs.push_back(RemapColumnRefs(CloneExpr(*e), get->column_ids));
+            } else {
+                op->exprs.push_back(CloneExpr(*e));
+            }
         }
     }
     op->output_types = node.output_types;
@@ -236,19 +257,118 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanDropTable(
 }
 
 // ---------------------------------------------------------------------------
-// PlanInsert / PlanDelete / PlanUpdate — deferred to Phase 8
+// PlanAggregate
+// ---------------------------------------------------------------------------
+
+std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanAggregate(
+    const LogicalAggregate& node) {
+
+    size_t num_agg = node.aggr_exprs.size();
+
+    // Shared hash table between SINK and SOURCE.
+    auto ht = std::make_shared<AggregateHashTable>(num_agg);
+
+    // Build SINK operator.
+    auto sink = std::make_unique<PhysicalHashAggregation>();
+    sink->ht          = ht;
+    sink->output_types = node.output_types;
+    sink->output_names = node.output_names;
+
+    for (const auto& ge : node.group_exprs) {
+        // Group exprs reference pre-agg input; remap if there's a LogicalGet child.
+        const LogicalGet* get = TryFindLogicalGet(node);
+        if (get) {
+            sink->group_exprs.push_back(RemapColumnRefs(CloneExpr(*ge), get->column_ids));
+        } else {
+            sink->group_exprs.push_back(CloneExpr(*ge));
+        }
+    }
+    for (const auto& ae : node.aggr_exprs) {
+        // Aggregate exprs may contain a child arg that references pre-agg columns.
+        const LogicalGet* get = TryFindLogicalGet(node);
+        if (get) {
+            sink->aggr_exprs.push_back(RemapColumnRefs(CloneExpr(*ae), get->column_ids));
+        } else {
+            sink->aggr_exprs.push_back(CloneExpr(*ae));
+        }
+        const auto& agg = static_cast<const LogicalAggrExpr&>(*ae);
+        (void)agg; // result types already in node.output_types
+    }
+
+    // Record result types for aggregate columns (after group cols).
+    size_t G = node.group_exprs.size();
+    for (size_t j = G; j < node.output_types.size(); ++j) {
+        sink->aggr_result_types.push_back(node.output_types[j]);
+    }
+
+    // Build scan/filter child.
+    sink->children.push_back(PlanNode(*node.children[0]));
+
+    // Build SOURCE operator.
+    auto source = std::make_unique<PhysicalAggregationSource>();
+    source->ht             = ht;
+    source->output_types   = node.output_types;
+    source->output_names   = node.output_names;
+    source->num_group_cols = G;
+    for (size_t j = 0; j < num_agg; ++j) {
+        const auto& ae = static_cast<const LogicalAggrExpr&>(*node.aggr_exprs[j]);
+        source->agg_funcs.push_back(ae.func);
+        source->agg_result_types.push_back(node.output_types[G + j]);
+    }
+
+    // Attach source as a child of the sink so Executor::BuildPipelines can reach it.
+    sink->source_op = std::move(source);
+
+    return sink;
+}
+
+// ---------------------------------------------------------------------------
+// PlanJoin
+// ---------------------------------------------------------------------------
+
+std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanJoin(const LogicalJoin& node) {
+    // Shared hash table between build (SINK) and probe (OPERATOR).
+    auto ht = std::make_shared<JoinHashTable>();
+
+    // Build side: plan the right child (children[1]).
+    auto right_child = PlanNode(*node.children[1]);
+
+    auto build = std::make_unique<PhysicalHashJoinBuild>();
+    build->ht           = ht;
+    build->key_col_idxs = node.right_key_col_ids;
+    build->output_types = right_child->output_types;
+    build->output_names = right_child->output_names;
+    build->children.push_back(std::move(right_child));
+
+    // Probe side: plan the left child (children[0]).
+    auto left_child = PlanNode(*node.children[0]);
+
+    auto probe = std::make_unique<PhysicalHashJoinProbe>();
+    probe->ht                 = ht;
+    probe->left_key_col_idxs  = node.left_key_col_ids;
+    probe->left_col_count     = node.children[0]->output_types.size();
+    probe->output_types       = node.output_types;
+    probe->output_names       = node.output_names;
+    probe->build_op           = std::move(build); // executor uses this for build pipeline
+    probe->children.push_back(std::move(left_child));
+
+    return probe;
+}
+
+// ---------------------------------------------------------------------------
+// PlanInsert / PlanDelete / PlanUpdate — deferred
 // ---------------------------------------------------------------------------
 
 std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanInsert(const LogicalInsert&) {
-    throw RuntimeError("PhysicalPlanner: INSERT not yet implemented — Phase 8");
+    throw RuntimeError("PhysicalPlanner: INSERT not yet implemented");
 }
 
 std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanDelete(const LogicalDelete&) {
-    throw RuntimeError("PhysicalPlanner: DELETE not yet implemented — Phase 8");
+    throw RuntimeError("PhysicalPlanner: DELETE not yet implemented");
 }
 
 std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanUpdate(const LogicalUpdate&) {
-    throw RuntimeError("PhysicalPlanner: UPDATE not yet implemented — Phase 8");
+    throw RuntimeError("PhysicalPlanner: UPDATE not yet implemented");
 }
 
 } // namespace cppcoldb

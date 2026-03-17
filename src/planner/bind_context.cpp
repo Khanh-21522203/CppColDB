@@ -5,11 +5,13 @@ namespace cppcoldb {
 
 void BindContext::AddTable(size_t table_idx, const std::string& alias,
                            const std::vector<std::string>& col_names,
-                           const std::vector<TypeId>&      col_types) {
+                           const std::vector<TypeId>&      col_types,
+                           size_t col_idx_offset) {
+    table_order_.push_back(alias);
     for (size_t i = 0; i < col_names.size(); ++i) {
         ColumnBinding b;
         b.table_idx   = table_idx;
-        b.column_idx  = i;
+        b.column_idx  = col_idx_offset + i;
         b.type        = col_types[i];
         b.column_name = col_names[i];
         b.table_name  = alias;

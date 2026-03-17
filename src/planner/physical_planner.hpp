@@ -20,6 +20,8 @@ private:
     std::unique_ptr<PhysicalOperator> PlanProjection (const LogicalProjection& node);
     std::unique_ptr<PhysicalOperator> PlanLimit      (const LogicalLimit&      node);
     std::unique_ptr<PhysicalOperator> PlanSort       (const LogicalSort&       node);
+    std::unique_ptr<PhysicalOperator> PlanAggregate  (const LogicalAggregate&  node);
+    std::unique_ptr<PhysicalOperator> PlanJoin       (const LogicalJoin&       node);
     std::unique_ptr<PhysicalOperator> PlanInsert     (const LogicalInsert&     node);
     std::unique_ptr<PhysicalOperator> PlanDelete     (const LogicalDelete&     node);
     std::unique_ptr<PhysicalOperator> PlanUpdate     (const LogicalUpdate&     node);
@@ -31,6 +33,9 @@ private:
     std::unique_ptr<LogicalExpr> RemapColumnRefs(
         std::unique_ptr<LogicalExpr> expr,
         const std::vector<size_t>& column_ids);
+
+    // Try to find a LogicalGet in the subtree; returns nullptr if not found (e.g., JOIN/AGGREGATE child).
+    static const LogicalGet* TryFindLogicalGet(const LogicalPlan& plan);
 };
 
 } // namespace cppcoldb

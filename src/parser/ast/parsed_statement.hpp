@@ -114,12 +114,19 @@ struct ParsedStatement {
     virtual ~ParsedStatement() = default;
 };
 
+struct JoinClause {
+    std::string           table_name;
+    std::string           schema_name; // empty → default "main"
+    std::unique_ptr<Expr> condition;   // ON clause
+};
+
 struct SelectStatement : ParsedStatement {
     SelectStatement() { stmt_type = Type::SELECT; }
     bool                               distinct = false;
     std::vector<std::unique_ptr<Expr>> select_list;
     std::string                        from_table;
     std::string                        from_schema; // empty → default "main"
+    std::vector<JoinClause>            joins;        // INNER JOIN clauses in order
     std::unique_ptr<Expr>              where_clause;
     std::vector<std::unique_ptr<Expr>> group_by;
     std::vector<std::unique_ptr<Expr>> order_by;

@@ -155,6 +155,17 @@ std::unique_ptr<SelectStatement> Parser::ParseSelect() {
     Expect(TokenType::KEYWORD, "FROM");
     ParseQualifiedName(stmt->from_schema, stmt->from_table);
 
+    // Parse optional [INNER] JOIN clauses.
+    while (Check(TokenType::KEYWORD, "INNER") || Check(TokenType::KEYWORD, "JOIN")) {
+        Match(TokenType::KEYWORD, "INNER"); // consume optional INNER
+        Expect(TokenType::KEYWORD, "JOIN");
+        JoinClause jc;
+        ParseQualifiedName(jc.schema_name, jc.table_name);
+        Expect(TokenType::KEYWORD, "ON");
+        jc.condition = ParseExpr();
+        stmt->joins.push_back(std::move(jc));
+    }
+
     if (Match(TokenType::KEYWORD, "WHERE"))
         stmt->where_clause = ParseExpr();
 

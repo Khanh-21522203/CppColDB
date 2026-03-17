@@ -39,6 +39,10 @@ std::unique_ptr<LogicalPlan> Binder::Bind(const ParsedStatement& stmt) {
 // ---------------------------------------------------------------------------
 
 std::unique_ptr<LogicalPlan> Binder::BindSelect(const SelectStatement& stmt) {
+    if (!stmt.joins.empty()) {
+        return BindSelectWithJoin(stmt);
+    }
+
     // Step 1: resolve FROM table
     if (stmt.from_table.empty()) {
         throw BindError("SELECT requires a FROM clause");
@@ -50,11 +54,6 @@ std::unique_ptr<LogicalPlan> Binder::BindSelect(const SelectStatement& stmt) {
     TableCatalogEntry* table = catalog_.GetTable(schema_name, stmt.from_table, tx_);
     if (!table) {
         throw BindError("table not found: " + stmt.from_table);
-    }
-
-    // Deferred: GROUP BY support (Phase 8)
-    if (!stmt.group_by.empty()) {
-        throw BindError("GROUP BY is not supported yet");
     }
 
     // Step 2: build BindContext
@@ -89,7 +88,45 @@ std::unique_ptr<LogicalPlan> Binder::BindSelect(const SelectStatement& stmt) {
         source_owned = std::move(filter);
     }
 
-    // Step 5: bind SELECT list
+    // Step 5: detect aggregation (GROUP BY or aggregate functions in SELECT list)
+    bool has_agg = !stmt.group_by.empty();
+    if (!has_agg) {
+        for (const auto& e : stmt.select_list) {
+            if (e && HasAggregateExpr(*e)) { has_agg = true; break; }
+        }
+    }
+
+    if (has_agg) {
+        source_owned = BindAggregateSelect(stmt, ctx, std::move(source_owned));
+        // BindAggregateSelect returns a LogicalProjection on top of LogicalAggregate.
+        // Skip the normal select-list binding below and jump to LIMIT/ORDER BY.
+        std::unique_ptr<LogicalPlan> top_owned = std::move(source_owned);
+
+        if (stmt.limit.has_value()) {
+            if (*stmt.limit < 0) throw BindError("LIMIT must be non-negative");
+            auto lim = std::make_unique<LogicalLimit>();
+            lim->limit        = *stmt.limit;
+            lim->offset       = stmt.offset.value_or(0);
+            lim->output_types = top_owned->output_types;
+            lim->output_names = top_owned->output_names;
+            lim->children.push_back(std::move(top_owned));
+            top_owned = std::move(lim);
+        }
+        if (!stmt.order_by.empty()) {
+            auto sort = std::make_unique<LogicalSort>();
+            for (size_t i = 0; i < stmt.order_by.size(); ++i) {
+                sort->sort_keys.push_back(BindExpr(*stmt.order_by[i], ctx));
+                sort->ascending.push_back(stmt.order_asc[i]);
+            }
+            sort->output_types = top_owned->output_types;
+            sort->output_names = top_owned->output_names;
+            sort->children.push_back(std::move(top_owned));
+            top_owned = std::move(sort);
+        }
+        return top_owned;
+    }
+
+    // Step 5b: bind SELECT list (no aggregation)
     std::vector<std::unique_ptr<LogicalExpr>> proj_exprs;
     std::vector<std::string>                  proj_names;
     std::vector<TypeId>                       proj_types;
@@ -602,18 +639,15 @@ std::unique_ptr<LogicalExpr> Binder::Coerce(std::unique_ptr<LogicalExpr> expr,
 std::vector<std::unique_ptr<LogicalExpr>> Binder::ExpandStar(const BindContext& ctx) {
     std::vector<std::unique_ptr<LogicalExpr>> result;
 
-    // Take the first (and for Phase 6/7 only) table in order
-    // tables_ is unordered; we just iterate the first entry found.
-    // For deterministic order, use the columns from the single table.
-    for (const auto& [alias, bindings] : ctx.Tables()) {
-        for (const auto& b : bindings) {
+    // Iterate tables in insertion order (table_order_) for deterministic output.
+    for (const auto& alias : ctx.TableOrder()) {
+        for (const auto& b : ctx.Tables().at(alias)) {
             auto ref = std::make_unique<BoundColumnRef>();
             ref->column_idx  = b.column_idx;
             ref->result_type = b.type;
             ref->name        = b.column_name;
             result.push_back(std::move(ref));
         }
-        break; // only first table for now
     }
     return result;
 }
@@ -695,6 +729,363 @@ bool Binder::IsIntegerType(TypeId t) const {
 bool Binder::IsComparisonOp(const std::string& op) const {
     return op == "=" || op == "<>" || op == "<" ||
            op == ">" || op == "<=" || op == ">=";
+}
+
+// ---------------------------------------------------------------------------
+// HasAggregateExpr
+// ---------------------------------------------------------------------------
+
+bool Binder::HasAggregateExpr(const Expr& e) const {
+    if (e.kind == Expr::Kind::FUNCTION_CALL) return true;
+    if (e.kind == Expr::Kind::BINARY_OP) {
+        const auto& b = static_cast<const BinaryOpExpr&>(e);
+        return HasAggregateExpr(*b.left) || HasAggregateExpr(*b.right);
+    }
+    if (e.kind == Expr::Kind::UNARY_OP) {
+        const auto& u = static_cast<const UnaryOpExpr&>(e);
+        return HasAggregateExpr(*u.operand);
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// BindAggregateSelect
+// Returns LogicalProjection → LogicalAggregate → scan/filter subtree.
+// ---------------------------------------------------------------------------
+
+std::unique_ptr<LogicalPlan> Binder::BindAggregateSelect(
+    const SelectStatement& stmt,
+    const BindContext& pre_agg_ctx,
+    std::unique_ptr<LogicalPlan> scan_filter) {
+
+    // A. Bind GROUP BY expressions (reference pre-aggregate input columns).
+    std::vector<std::unique_ptr<LogicalExpr>> group_exprs;
+    std::vector<std::string>  group_names;
+    std::vector<TypeId>       group_types;
+
+    for (const auto& g : stmt.group_by) {
+        auto bound = BindExpr(*g, pre_agg_ctx);
+        std::string name = (g->kind == Expr::Kind::COLUMN_REF)
+            ? static_cast<const ColumnRefExpr&>(*g).column_name
+            : "?group";
+        group_types.push_back(bound->result_type);
+        group_names.push_back(name);
+        group_exprs.push_back(std::move(bound));
+    }
+
+    // B. Collect aggregate expressions from the SELECT list (in order of appearance).
+    //    Also determine the name for each aggregate output column.
+    std::vector<std::unique_ptr<LogicalExpr>> aggr_exprs;
+    std::vector<std::string>  aggr_names;
+    std::vector<TypeId>       aggr_types;
+
+    // Walk SELECT list and collect aggregate calls.
+    std::function<void(const Expr&)> CollectAggr = [&](const Expr& e) {
+        if (e.kind == Expr::Kind::FUNCTION_CALL) {
+            auto bound = BindAggregate(static_cast<const FunctionCallExpr&>(e), pre_agg_ctx);
+            const auto& fc = static_cast<const FunctionCallExpr&>(e);
+            std::string nm = fc.is_star ? (fc.name + "(*)") : fc.name;
+            aggr_types.push_back(bound->result_type);
+            aggr_names.push_back(nm);
+            aggr_exprs.push_back(std::move(bound));
+        } else if (e.kind == Expr::Kind::BINARY_OP) {
+            const auto& b = static_cast<const BinaryOpExpr&>(e);
+            CollectAggr(*b.left); CollectAggr(*b.right);
+        } else if (e.kind == Expr::Kind::UNARY_OP) {
+            CollectAggr(*static_cast<const UnaryOpExpr&>(e).operand);
+        }
+    };
+    for (const auto& se : stmt.select_list) {
+        if (se) CollectAggr(*se);
+    }
+
+    // C. Build LogicalAggregate.
+    //    Output schema: [group_cols..., agg_results...]
+    std::vector<std::string> agg_out_names = group_names;
+    std::vector<TypeId>      agg_out_types = group_types;
+    for (auto& n : aggr_names) agg_out_names.push_back(n);
+    for (auto& t : aggr_types) agg_out_types.push_back(t);
+
+    auto agg_node = std::make_unique<LogicalAggregate>();
+    for (const auto& ge : group_exprs)
+        agg_node->group_exprs.push_back(CloneExpr(*ge));
+    for (const auto& ae : aggr_exprs)
+        agg_node->aggr_exprs.push_back(CloneExpr(*ae));
+    agg_node->output_names = agg_out_names;
+    agg_node->output_types = agg_out_types;
+    agg_node->children.push_back(std::move(scan_filter));
+
+    // D. Build SELECT list projection referencing aggregate output positions.
+    //    group cols are at 0..G-1, agg results at G..G+A-1.
+    size_t G = group_exprs.size();
+    size_t agg_cursor = 0;  // index into aggr_exprs for next aggregate in SELECT list
+
+    std::vector<std::unique_ptr<LogicalExpr>> proj_exprs;
+    std::vector<std::string>  proj_names;
+    std::vector<TypeId>       proj_types;
+
+    std::function<void(const Expr&, const std::string&)> BindPostAgg;
+    BindPostAgg = [&](const Expr& e, const std::string& hint_name) {
+        if (e.kind == Expr::Kind::STAR) {
+            for (size_t i = 0; i < agg_out_names.size(); ++i) {
+                auto ref = std::make_unique<BoundColumnRef>();
+                ref->column_idx  = i;
+                ref->result_type = agg_out_types[i];
+                ref->name        = agg_out_names[i];
+                proj_names.push_back(agg_out_names[i]);
+                proj_types.push_back(agg_out_types[i]);
+                proj_exprs.push_back(std::move(ref));
+            }
+            return;
+        }
+        if (e.kind == Expr::Kind::FUNCTION_CALL) {
+            // Map to position G + agg_cursor.
+            size_t pos = G + agg_cursor++;
+            auto ref = std::make_unique<BoundColumnRef>();
+            ref->column_idx  = pos;
+            ref->result_type = agg_out_types[pos];
+            ref->name        = agg_out_names[pos];
+            std::string nm = hint_name.empty() ? agg_out_names[pos] : hint_name;
+            proj_names.push_back(nm);
+            proj_types.push_back(agg_out_types[pos]);
+            proj_exprs.push_back(std::move(ref));
+            return;
+        }
+        if (e.kind == Expr::Kind::COLUMN_REF) {
+            const auto& cr = static_cast<const ColumnRefExpr&>(e);
+            // Find matching group expression by column name.
+            for (size_t i = 0; i < G; ++i) {
+                if (group_names[i] == cr.column_name) {
+                    auto ref = std::make_unique<BoundColumnRef>();
+                    ref->column_idx  = i;
+                    ref->result_type = group_types[i];
+                    ref->name        = group_names[i];
+                    std::string nm = hint_name.empty() ? cr.column_name : hint_name;
+                    proj_names.push_back(nm);
+                    proj_types.push_back(group_types[i]);
+                    proj_exprs.push_back(std::move(ref));
+                    return;
+                }
+            }
+            throw BindError("column '" + cr.column_name + "' must appear in GROUP BY");
+        }
+        throw BindError("complex expressions in SELECT with GROUP BY not supported");
+    };
+
+    for (const auto& se : stmt.select_list) {
+        std::string nm;
+        if (se->kind == Expr::Kind::COLUMN_REF)
+            nm = static_cast<const ColumnRefExpr&>(*se).column_name;
+        BindPostAgg(*se, nm);
+    }
+
+    auto proj = std::make_unique<LogicalProjection>();
+    proj->exprs        = std::move(proj_exprs);
+    proj->output_types = proj_types;
+    proj->output_names = proj_names;
+    proj->children.push_back(std::move(agg_node));
+    return proj;
+}
+
+// ---------------------------------------------------------------------------
+// BindSelectWithJoin
+// Handles SELECT ... FROM t1 [INNER] JOIN t2 ON ... [WHERE ...] ...
+// ---------------------------------------------------------------------------
+
+// Helper: walk a bound expression looking for equi-join conditions (col = col)
+// and split them into left-side and right-side key column indices.
+static void ExtractEquiJoinKeys(const LogicalExpr& cond, size_t left_count,
+                                std::vector<size_t>& left_keys,
+                                std::vector<size_t>& right_keys) {
+    if (cond.kind != LogicalExpr::Kind::BINARY_OP) return;
+    const auto& b = static_cast<const LogicalBinaryOp&>(cond);
+    if (b.op == "AND") {
+        ExtractEquiJoinKeys(*b.left,  left_count, left_keys, right_keys);
+        ExtractEquiJoinKeys(*b.right, left_count, left_keys, right_keys);
+        return;
+    }
+    if (b.op == "=") {
+        if (b.left->kind  != LogicalExpr::Kind::BOUND_COLUMN_REF ||
+            b.right->kind != LogicalExpr::Kind::BOUND_COLUMN_REF) return;
+        size_t li = static_cast<const BoundColumnRef&>(*b.left).column_idx;
+        size_t ri = static_cast<const BoundColumnRef&>(*b.right).column_idx;
+        if (li < left_count && ri >= left_count) {
+            left_keys.push_back(li);
+            right_keys.push_back(ri - left_count);
+        } else if (ri < left_count && li >= left_count) {
+            left_keys.push_back(ri);
+            right_keys.push_back(li - left_count);
+        }
+    }
+}
+
+std::unique_ptr<LogicalPlan> Binder::BindSelectWithJoin(const SelectStatement& stmt) {
+    // Resolve left (FROM) table.
+    const std::string left_schema = stmt.from_schema.empty()
+                                  ? Catalog::DEFAULT_SCHEMA : stmt.from_schema;
+    TableCatalogEntry* left_table = catalog_.GetTable(left_schema, stmt.from_table, tx_);
+    if (!left_table) throw BindError("table not found: " + stmt.from_table);
+
+    // Resolve all right (JOIN) tables.
+    std::vector<TableCatalogEntry*> right_tables;
+    std::vector<std::string>        right_schemas;
+    for (const auto& jc : stmt.joins) {
+        std::string rs = jc.schema_name.empty() ? Catalog::DEFAULT_SCHEMA : jc.schema_name;
+        TableCatalogEntry* rt = catalog_.GetTable(rs, jc.table_name, tx_);
+        if (!rt) throw BindError("table not found: " + jc.table_name);
+        right_tables.push_back(rt);
+        right_schemas.push_back(rs);
+    }
+
+    // Build combined BindContext (all tables, with proper col_idx_offset).
+    BindContext ctx;
+    size_t col_offset = 0;
+    ctx.AddTable(0, stmt.from_table,
+                 left_table->ColumnNames(), left_table->ColumnTypes(), col_offset);
+    col_offset += left_table->ColumnCount();
+    for (size_t i = 0; i < stmt.joins.size(); ++i) {
+        ctx.AddTable(i + 1, stmt.joins[i].table_name,
+                     right_tables[i]->ColumnNames(), right_tables[i]->ColumnTypes(),
+                     col_offset);
+        col_offset += right_tables[i]->ColumnCount();
+    }
+
+    // Build left LogicalGet.
+    auto left_get = std::make_unique<LogicalGet>();
+    left_get->schema_name = left_schema;
+    left_get->table_name  = stmt.from_table;
+    for (size_t i = 0; i < left_table->ColumnCount(); ++i) left_get->column_ids.push_back(i);
+    left_get->output_types = left_table->ColumnTypes();
+    left_get->output_names = left_table->ColumnNames();
+    for (const auto& rg : left_table->row_groups) left_get->catalog_row_count += rg->RowCount();
+
+    std::unique_ptr<LogicalPlan> current_plan = std::move(left_get);
+
+    // For each JOIN clause, build right LogicalGet and wrap in LogicalJoin.
+    size_t left_count = left_table->ColumnCount(); // accumulated left-side column count
+    for (size_t i = 0; i < stmt.joins.size(); ++i) {
+        const auto& jc = stmt.joins[i];
+        TableCatalogEntry* rtable = right_tables[i];
+
+        // Build right LogicalGet.
+        auto right_get = std::make_unique<LogicalGet>();
+        right_get->schema_name = right_schemas[i];
+        right_get->table_name  = jc.table_name;
+        for (size_t k = 0; k < rtable->ColumnCount(); ++k) right_get->column_ids.push_back(k);
+        right_get->output_types = rtable->ColumnTypes();
+        right_get->output_names = rtable->ColumnNames();
+        for (const auto& rg : rtable->row_groups) right_get->catalog_row_count += rg->RowCount();
+
+        // Bind ON condition against the combined context.
+        auto condition = BindExpr(*jc.condition, ctx);
+
+        // Extract equi-join key positions.
+        std::vector<size_t> left_keys, right_keys;
+        ExtractEquiJoinKeys(*condition, left_count, left_keys, right_keys);
+
+        // Join output types = current_plan types + right types.
+        std::vector<TypeId>      join_types = current_plan->output_types;
+        std::vector<std::string> join_names = current_plan->output_names;
+        for (auto& t : rtable->ColumnTypes()) join_types.push_back(t);
+        for (auto& n : rtable->ColumnNames()) join_names.push_back(n);
+
+        auto join_node = std::make_unique<LogicalJoin>();
+        join_node->condition         = std::move(condition);
+        join_node->left_key_col_ids  = std::move(left_keys);
+        join_node->right_key_col_ids = std::move(right_keys);
+        join_node->output_types      = std::move(join_types);
+        join_node->output_names      = std::move(join_names);
+        join_node->children.push_back(std::move(current_plan)); // left
+        join_node->children.push_back(std::move(right_get));    // right
+
+        left_count += rtable->ColumnCount();
+        current_plan = std::move(join_node);
+    }
+
+    // Apply WHERE filter (bound against combined context).
+    if (stmt.where_clause) {
+        auto pred = BindExpr(*stmt.where_clause, ctx);
+        if (pred->result_type != TypeId::BOOLEAN)
+            throw BindError("WHERE clause must be boolean");
+        auto filter = std::make_unique<LogicalFilter>();
+        filter->predicate    = std::move(pred);
+        filter->output_types = current_plan->output_types;
+        filter->output_names = current_plan->output_names;
+        filter->children.push_back(std::move(current_plan));
+        current_plan = std::move(filter);
+    }
+
+    // Detect aggregation.
+    bool has_agg = !stmt.group_by.empty();
+    if (!has_agg) {
+        for (const auto& e : stmt.select_list) {
+            if (e && HasAggregateExpr(*e)) { has_agg = true; break; }
+        }
+    }
+
+    if (has_agg) {
+        current_plan = BindAggregateSelect(stmt, ctx, std::move(current_plan));
+    } else {
+        // Bind SELECT list (no aggregation).
+        std::vector<std::unique_ptr<LogicalExpr>> proj_exprs;
+        std::vector<std::string>                  proj_names;
+        std::vector<TypeId>                       proj_types;
+
+        for (const auto& expr_ptr : stmt.select_list) {
+            if (expr_ptr->kind == Expr::Kind::STAR) {
+                auto expanded = ExpandStar(ctx);
+                for (auto& e : expanded) {
+                    proj_names.push_back(static_cast<BoundColumnRef&>(*e).name);
+                    proj_types.push_back(e->result_type);
+                    proj_exprs.push_back(std::move(e));
+                }
+            } else {
+                auto bound = BindExpr(*expr_ptr, ctx, /*allow_aggregates=*/true);
+                std::string name;
+                if (expr_ptr->kind == Expr::Kind::COLUMN_REF)
+                    name = static_cast<const ColumnRefExpr&>(*expr_ptr).column_name;
+                else
+                    name = "?col";
+                proj_names.push_back(name);
+                proj_types.push_back(bound->result_type);
+                proj_exprs.push_back(std::move(bound));
+            }
+        }
+
+        auto proj = std::make_unique<LogicalProjection>();
+        proj->exprs        = std::move(proj_exprs);
+        proj->output_types = proj_types;
+        proj->output_names = proj_names;
+        proj->children.push_back(std::move(current_plan));
+        current_plan = std::move(proj);
+    }
+
+    // LIMIT / OFFSET.
+    if (stmt.limit.has_value()) {
+        if (*stmt.limit < 0) throw BindError("LIMIT must be non-negative");
+        auto lim = std::make_unique<LogicalLimit>();
+        lim->limit        = *stmt.limit;
+        lim->offset       = stmt.offset.value_or(0);
+        lim->output_types = current_plan->output_types;
+        lim->output_names = current_plan->output_names;
+        lim->children.push_back(std::move(current_plan));
+        current_plan = std::move(lim);
+    }
+
+    // ORDER BY.
+    if (!stmt.order_by.empty()) {
+        auto sort = std::make_unique<LogicalSort>();
+        for (size_t i = 0; i < stmt.order_by.size(); ++i) {
+            sort->sort_keys.push_back(BindExpr(*stmt.order_by[i], ctx));
+            sort->ascending.push_back(stmt.order_asc[i]);
+        }
+        sort->output_types = current_plan->output_types;
+        sort->output_names = current_plan->output_names;
+        sort->children.push_back(std::move(current_plan));
+        current_plan = std::move(sort);
+    }
+
+    return current_plan;
 }
 
 } // namespace cppcoldb

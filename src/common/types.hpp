@@ -131,4 +131,8 @@ void DataVectorFill(DataVector& vec, const Value& val, size_t count);
 void DataChunkSlice(DataChunk& dst, const DataChunk& src,
                     const std::vector<uint32_t>& row_indices);
 
+// Append a single Value to dst at dst.count, advancing dst.count by 1.
+// dst must be pre-initialized (Reset called with the appropriate type).
+void DataVectorAppendValue(DataVector& dst, const Value& val);
+
 } // namespace cppcoldb

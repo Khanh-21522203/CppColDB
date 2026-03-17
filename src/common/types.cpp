@@ -319,4 +319,38 @@ void DataChunkSlice(DataChunk& dst, const DataChunk& src,
     dst.count = row_indices.size();
 }
 
+void DataVectorAppendValue(DataVector& dst, const Value& val) {
+    size_t i = dst.count++;
+    if (val.IsNull()) {
+        dst.SetNull(i);
+        return;
+    }
+    dst.validity.set(i);
+    switch (dst.type) {
+        case TypeId::BOOLEAN:
+            if (dst.int_data.size() <= i) dst.int_data.resize(i + 1, 0);
+            dst.int_data[i] = std::get<bool>(val.data) ? 1 : 0;
+            break;
+        case TypeId::INT8:
+        case TypeId::INT16:
+        case TypeId::INT32:
+        case TypeId::INT64:
+            if (dst.int_data.size() <= i) dst.int_data.resize(i + 1, 0);
+            dst.int_data[i] = std::get<int64_t>(val.data);
+            break;
+        case TypeId::FLOAT32:
+        case TypeId::FLOAT64:
+            if (dst.float_data.size() <= i) dst.float_data.resize(i + 1, 0.0);
+            dst.float_data[i] = std::get<double>(val.data);
+            break;
+        case TypeId::VARCHAR:
+            if (dst.str_data.size() <= i) dst.str_data.resize(i + 1, "");
+            dst.str_data[i] = std::get<std::string>(val.data);
+            break;
+        case TypeId::INVALID:
+            dst.SetNull(i);
+            break;
+    }
+}
+
 } // namespace cppcoldb

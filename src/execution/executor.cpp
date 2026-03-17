@@ -1,5 +1,7 @@
 #include "execution/executor.hpp"
 #include "execution/pipeline_executor.hpp"
+#include "execution/operator/physical_hash_aggregation.hpp"
+#include "execution/operator/physical_hash_join.hpp"
 #include "main/client_context.hpp"
 
 #include <unordered_set>
@@ -37,18 +39,46 @@ void Executor::BuildPipelines(PhysicalOperator* op, Pipeline* current_pipeline) 
             // Prepend: deeper operators (closer to source) are added later → they end
             // up at lower indices after prepend. Source-adjacent ops are at index 0.
             current_pipeline->operators.insert(current_pipeline->operators.begin(), op);
-            // TODO (Phase 8): if op is PhysicalHashJoinProbe, create a separate build
-            // pipeline for the build side, add it to pipelines_, and register it as a
-            // dependency of current_pipeline before recursing into the probe child.
+
+            if (auto* probe = dynamic_cast<PhysicalHashJoinProbe*>(op)) {
+                // Two-pipeline hash join pattern:
+                //   build_pipeline: right_scan → PhysicalHashJoinBuild (SINK)
+                //   current_pipeline: left_scan → PhysicalHashJoinProbe (OPERATOR) → sink
+                // The probe pipeline depends on the build pipeline completing first.
+                auto build_pipeline      = std::make_unique<Pipeline>();
+                build_pipeline->sink     = probe->build_op.get();
+                if (!probe->build_op->children.empty()) {
+                    BuildPipelines(probe->build_op->children[0].get(), build_pipeline.get());
+                }
+                current_pipeline->dependencies.push_back(build_pipeline.get());
+                pipelines_.push_back(std::move(build_pipeline));
+            }
+
+            // Recurse into probe/left child for the current (probe) pipeline.
             if (!op->children.empty()) {
                 BuildPipelines(op->children[0].get(), current_pipeline);
             }
             break;
 
         case OperatorRole::SINK:
-            current_pipeline->sink = op;
-            if (!op->children.empty()) {
-                BuildPipelines(op->children[0].get(), current_pipeline);
+            if (auto* agg = dynamic_cast<PhysicalHashAggregation*>(op)) {
+                // Two-pipeline aggregation pattern:
+                //   consume_pipeline: scan/filter → PhysicalHashAggregation (SINK)
+                //   current_pipeline: PhysicalAggregationSource (SOURCE) → ... → ResultCollector (already set)
+                auto consume_pipeline = std::make_unique<Pipeline>();
+                consume_pipeline->sink = op;
+                if (!op->children.empty()) {
+                    BuildPipelines(op->children[0].get(), consume_pipeline.get());
+                }
+                current_pipeline->dependencies.push_back(consume_pipeline.get());
+                current_pipeline->source = agg->source_op.get();
+                pipelines_.push_back(std::move(consume_pipeline));
+                // Do NOT recurse into children for current_pipeline — source already set.
+            } else {
+                current_pipeline->sink = op;
+                if (!op->children.empty()) {
+                    BuildPipelines(op->children[0].get(), current_pipeline);
+                }
             }
             break;
     }
