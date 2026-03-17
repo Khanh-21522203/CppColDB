@@ -46,6 +46,7 @@ OperatorResultType PhysicalInsert::GetData(OperatorState& raw_state,
     ue.row_group_id = rg_id;
     ue.append_start = append_start;
     ue.append_count = rows.count;
+    ue.inserted_rows = rows;
     ctx.transaction->undo_buffer.PushInsert(std::move(ue));
 
     return OperatorResultType::FINISHED;

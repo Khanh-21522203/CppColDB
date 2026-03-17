@@ -41,6 +41,7 @@ public:
     bool IsVisible(uint32_t row_offset, const Transaction& tx) const;
 
     bool HasAnyMarkers() const { return !markers_.empty(); }
+    bool HasUncommittedMarkers() const;
 
 private:
     std::unordered_map<uint32_t, VersionMarker> markers_;

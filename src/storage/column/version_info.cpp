@@ -74,10 +74,23 @@ bool VersionInfo::IsVisible(uint32_t row_offset, const Transaction& tx) const {
             return false;     // committed after T started — not visible
 
         case VersionMarkerType::UPDATE:
-            return true; // row is visible; updated value resolved via UndoBuffer in Phase 4
+            if (m.tx_id == tx.tx_id)
+                return true;  // own update
+            if (m.commit_time == INVALID_TIMESTAMP)
+                return false; // hide uncommitted update from others
+            if (m.commit_time < tx.start_time)
+                return true;  // committed before snapshot
+            return false;     // committed after snapshot
     }
 
     return true;
+}
+
+bool VersionInfo::HasUncommittedMarkers() const {
+    for (const auto& [_, marker] : markers_) {
+        if (marker.commit_time == INVALID_TIMESTAMP) return true;
+    }
+    return false;
 }
 
 } // namespace cppcoldb

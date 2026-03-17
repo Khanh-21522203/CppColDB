@@ -10,6 +10,9 @@ struct CatalogUndoEntry {
     std::string schema;
     std::string table;
     bool        was_create; // true = undo a CREATE; false = undo a DROP
+    // Filled for CREATE TABLE so WAL logging at commit can serialize schema.
+    std::vector<std::string> col_names;
+    std::vector<TypeId>      col_types;
 };
 
 struct InsertUndoEntry {
@@ -18,6 +21,8 @@ struct InsertUndoEntry {
     size_t      row_group_id;
     size_t      append_start;
     size_t      append_count;
+    // Materialized inserted rows for commit-time WAL logging.
+    DataChunk   inserted_rows;
 };
 
 struct DeleteUndoEntry {
@@ -31,7 +36,8 @@ struct UpdateUndoEntry {
     std::string         table;
     std::vector<row_t>  row_ids;
     std::vector<size_t> col_ids;
-    DataChunk           old_values;
+    DataChunk           old_values; // for rollback
+    DataChunk           new_values; // for WAL (redo)
 };
 
 using UndoEntry = std::variant<CatalogUndoEntry, InsertUndoEntry,

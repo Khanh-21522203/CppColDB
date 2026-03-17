@@ -119,10 +119,20 @@ void TransactionManager::UndoBufferReverse(Transaction& tx) {
         } else if (const auto* e = std::get_if<UpdateUndoEntry>(&entry)) {
             auto* table = catalog_.GetTable(e->schema, e->table, tx);
             if (table) {
-                for (row_t row_id : e->row_ids) {
+                size_t row_count = std::min(e->row_ids.size(), e->old_values.count);
+                for (size_t ridx = 0; ridx < row_count; ++ridx) {
+                    row_t row_id = e->row_ids[ridx];
                     uint32_t rg_idx = RowIdGroup(row_id);
                     uint32_t offset = RowIdOffset(row_id);
                     if (rg_idx < table->row_groups.size()) {
+                        auto& rg = table->row_groups[rg_idx];
+                        auto& chunks = rg->ColumnChunks();
+                        for (size_t ui = 0; ui < e->col_ids.size(); ++ui) {
+                            size_t col_id = e->col_ids[ui];
+                            if (ui >= e->old_values.columns.size()) break;
+                            if (col_id >= chunks.size()) continue;
+                            chunks[col_id].WriteRow(offset, e->old_values.columns[ui], ridx);
+                        }
                         table->row_groups[rg_idx]->GetVersionInfo()
                             .RevertUpdate(offset);
                     }

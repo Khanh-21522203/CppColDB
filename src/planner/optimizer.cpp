@@ -483,9 +483,20 @@ std::unique_ptr<LogicalPlan> Optimizer::PruneColumns(
             return plan;
         }
 
-        case LogicalPlan::Type::LIMIT:
+        case LogicalPlan::Type::LIMIT: {
+            for (auto& child : plan->children) {
+                child = PruneColumns(std::move(child), required_cols);
+            }
+            return plan;
+        }
+
         case LogicalPlan::Type::SORT: {
-            // Pass required_cols through unchanged
+            // Sort key expressions reference pre-sort input columns; include them
+            // in required_cols so they are not pruned from the scan below.
+            auto& srt = static_cast<LogicalSort&>(*plan);
+            for (const auto& key : srt.sort_keys) {
+                if (key) CollectColumnRefs(*key, required_cols);
+            }
             for (auto& child : plan->children) {
                 child = PruneColumns(std::move(child), required_cols);
             }

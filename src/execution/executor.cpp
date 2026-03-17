@@ -2,6 +2,7 @@
 #include "execution/pipeline_executor.hpp"
 #include "execution/operator/physical_hash_aggregation.hpp"
 #include "execution/operator/physical_hash_join.hpp"
+#include "execution/operator/physical_sort.hpp"
 #include "main/client_context.hpp"
 
 #include <unordered_set>
@@ -42,6 +43,9 @@ static void RegisterOperators(PhysicalOperator* op, QueryProfiler& profiler) {
     }
     if (auto* agg = dynamic_cast<PhysicalHashAggregation*>(op)) {
         RegisterOperators(agg->source_op.get(), profiler);
+    }
+    if (auto* srt = dynamic_cast<PhysicalSort*>(op)) {
+        RegisterOperators(srt->source_op.get(), profiler);
     }
 }
 
@@ -109,6 +113,18 @@ void Executor::BuildPipelines(PhysicalOperator* op, Pipeline* current_pipeline) 
                 current_pipeline->source = agg->source_op.get();
                 pipelines_.push_back(std::move(consume_pipeline));
                 // Do NOT recurse into children for current_pipeline — source already set.
+            } else if (auto* srt = dynamic_cast<PhysicalSort*>(op)) {
+                // Two-pipeline sort pattern (mirrors aggregation):
+                //   consume_pipeline: scan/filter → PhysicalSort (SINK)
+                //   current_pipeline: PhysicalSortSource (SOURCE) → ... → ResultCollector
+                auto consume_pipeline = std::make_unique<Pipeline>();
+                consume_pipeline->sink = op;
+                if (!op->children.empty()) {
+                    BuildPipelines(op->children[0].get(), consume_pipeline.get());
+                }
+                current_pipeline->dependencies.push_back(consume_pipeline.get());
+                current_pipeline->source = srt->source_op.get();
+                pipelines_.push_back(std::move(consume_pipeline));
             } else {
                 current_pipeline->sink = op;
                 if (!op->children.empty()) {

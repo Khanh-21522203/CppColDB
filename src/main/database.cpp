@@ -7,6 +7,7 @@
 #include "catalog/catalog_entry.hpp"
 #include "transaction/transaction_manager.hpp"
 #include "transaction/transaction.hpp"
+#include "transaction/undo_buffer.hpp"
 #include "checkpoint/checkpoint_manager.hpp"
 #include "parallel/task_scheduler.hpp"
 #include "storage/column/row_group.hpp"
@@ -15,6 +16,7 @@
 #include <sys/stat.h>
 #include <cstring>
 #include <algorithm>
+#include <numeric>
 
 namespace cppcoldb {
 
@@ -30,14 +32,9 @@ static double   RdF64(const uint8_t*& p) { uint64_t bits=RdU64(p);double v;memcp
 static std::string RdStr(const uint8_t*& p) { uint16_t len=RdU16(p);std::string s(reinterpret_cast<const char*>(p),len);p+=len;return s; }
 
 // ---------------------------------------------------------------------------
-// Decode a DataChunk from a WAL_INSERT payload
+// Decode a DataChunk payload produced by WAL::SerializeChunk.
 // ---------------------------------------------------------------------------
-static DataChunk DeserializeChunk(const uint8_t* data, size_t /*size*/) {
-    const uint8_t* p = data;
-
-    /*std::string schema =*/ RdStr(p);
-    /*std::string table  =*/ RdStr(p);
-
+static DataChunk DeserializeChunkPayload(const uint8_t*& p) {
     uint32_t row_count = RdU32(p);
     uint32_t col_count = RdU32(p);
 
@@ -226,18 +223,142 @@ void Database::ReplayWAL() {
             }
 
             case WALEntryType::WAL_INSERT: {
-                // Peek at schema/table without advancing p permanently.
-                const uint8_t* pp = p;
-                std::string schema_name = RdStr(pp);
-                std::string table_name  = RdStr(pp);
-
-                DataChunk chunk = DeserializeChunk(p, e.data.size());
+                std::string schema_name = RdStr(p);
+                std::string table_name  = RdStr(p);
+                DataChunk chunk = DeserializeChunkPayload(p);
 
                 auto tx = txn_manager_->BeginTransaction(true);
                 try {
-                    // Store locally so TransactionManager::Commit appends it.
-                    std::string key = schema_name + "." + table_name;
-                    tx->local_storage[key] = std::move(chunk);
+                    auto* table = catalog_->GetTable(schema_name, table_name, *tx);
+                    if (table) {
+                        std::vector<size_t> col_ids(table->columns.size());
+                        std::iota(col_ids.begin(), col_ids.end(), 0);
+
+                        RowGroup* rg = table->GetOrAddRowGroup();
+                        size_t rg_id = table->row_groups.size() - 1;
+                        size_t append_start = rg->RowCount();
+                        rg->Append(chunk, col_ids, tx->tx_id);
+
+                        InsertUndoEntry ue;
+                        ue.schema = schema_name;
+                        ue.table = table_name;
+                        ue.row_group_id = rg_id;
+                        ue.append_start = append_start;
+                        ue.append_count = chunk.count;
+                        ue.inserted_rows = chunk;
+                        tx->undo_buffer.PushInsert(std::move(ue));
+                    }
+                    txn_manager_->Commit(tx);
+                } catch (...) {
+                    txn_manager_->Rollback(tx);
+                }
+                break;
+            }
+
+            case WALEntryType::WAL_DELETE: {
+                std::string schema_name = RdStr(p);
+                std::string table_name  = RdStr(p);
+                uint32_t    count       = RdU32(p);
+                std::vector<row_t> row_ids;
+                row_ids.reserve(count);
+                for (uint32_t i = 0; i < count; ++i) row_ids.push_back(RdU64(p));
+
+                auto tx = txn_manager_->BeginTransaction(true);
+                try {
+                    auto* table = catalog_->GetTable(schema_name, table_name, *tx);
+                    if (table) {
+                        DeleteUndoEntry ue;
+                        ue.schema  = schema_name;
+                        ue.table   = table_name;
+                        ue.row_ids = row_ids;
+                        for (row_t rid : row_ids) {
+                            uint32_t rg_idx = RowIdGroup(rid);
+                            uint32_t offset = RowIdOffset(rid);
+                            if (rg_idx < table->row_groups.size()) {
+                                table->row_groups[rg_idx]->GetVersionInfo()
+                                    .MarkDeleted(offset, tx->tx_id);
+                            }
+                        }
+                        tx->undo_buffer.PushDelete(std::move(ue));
+                    }
+                    txn_manager_->Commit(tx);
+                } catch (...) {
+                    txn_manager_->Rollback(tx);
+                }
+                break;
+            }
+
+            case WALEntryType::WAL_UPDATE: {
+                std::string schema_name = RdStr(p);
+                std::string table_name  = RdStr(p);
+
+                uint32_t col_count = RdU32(p);
+                std::vector<size_t> col_ids;
+                col_ids.reserve(col_count);
+                for (uint32_t i = 0; i < col_count; ++i) {
+                    col_ids.push_back(static_cast<size_t>(RdU32(p)));
+                }
+
+                uint32_t row_count = RdU32(p);
+                std::vector<row_t> row_ids;
+                row_ids.reserve(row_count);
+                for (uint32_t i = 0; i < row_count; ++i) row_ids.push_back(RdU64(p));
+
+                DataChunk new_values = DeserializeChunkPayload(p);
+
+                auto tx = txn_manager_->BeginTransaction(true);
+                try {
+                    auto* table = catalog_->GetTable(schema_name, table_name, *tx);
+                    if (table && row_count == new_values.count &&
+                        col_count == new_values.ColumnCount()) {
+                        std::vector<TypeId> update_types;
+                        update_types.reserve(col_ids.size());
+                        for (size_t col_id : col_ids) {
+                            update_types.push_back(table->columns[col_id].type);
+                        }
+
+                        std::vector<row_t> applied_row_ids;
+                        applied_row_ids.reserve(row_ids.size());
+
+                        DataChunk old_values;
+                        DataChunk applied_new_values;
+                        old_values.Initialize(update_types);
+                        applied_new_values.Initialize(update_types);
+
+                        for (size_t ridx = 0; ridx < row_ids.size(); ++ridx) {
+                            uint32_t rg_idx = RowIdGroup(row_ids[ridx]);
+                            uint32_t offset = RowIdOffset(row_ids[ridx]);
+                            if (rg_idx >= table->row_groups.size()) continue;
+                            auto& rg = table->row_groups[rg_idx];
+                            auto& chunks = rg->ColumnChunks();
+
+                            for (size_t ui = 0; ui < col_ids.size(); ++ui) {
+                                size_t col_id = col_ids[ui];
+                                DataVector cur;
+                                ColumnScanState s = chunks[col_id].MakeScanState(offset);
+                                chunks[col_id].Scan(s, 1, cur);
+                                DataVectorAppend(old_values.columns[ui], cur, 0);
+                                chunks[col_id].WriteRow(offset, new_values.columns[ui], ridx);
+                                DataVectorAppend(applied_new_values.columns[ui],
+                                                 new_values.columns[ui], ridx);
+                            }
+                            old_values.count++;
+                            applied_new_values.count++;
+                            applied_row_ids.push_back(row_ids[ridx]);
+                            rg->GetVersionInfo().MarkUpdated(offset, tx->tx_id);
+                        }
+
+                        if (!applied_row_ids.empty()) {
+                            UpdateUndoEntry ue;
+                            ue.schema = schema_name;
+                            ue.table = table_name;
+                            ue.row_ids = std::move(applied_row_ids);
+                            ue.col_ids = col_ids;
+                            ue.old_values = std::move(old_values);
+                            ue.new_values = std::move(applied_new_values);
+                            tx->undo_buffer.PushUpdate(std::move(ue));
+                        }
+                    }
                     txn_manager_->Commit(tx);
                 } catch (...) {
                     txn_manager_->Rollback(tx);
@@ -246,7 +367,7 @@ void Database::ReplayWAL() {
             }
 
             default:
-                // Skip WAL_DELETE, WAL_UPDATE, WAL_CREATE_SCHEMA, etc.
+                // Skip WAL_CREATE_SCHEMA, WAL_DROP_SCHEMA, etc.
                 break;
         }
     }

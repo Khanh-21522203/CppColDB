@@ -1,4 +1,8 @@
 #include "planner/physical_planner.hpp"
+#include "execution/operator/physical_delete.hpp"
+#include "execution/operator/physical_update.hpp"
+#include "execution/operator/physical_sort.hpp"
+#include "execution/operator/physical_sort_source.hpp"
 #include "execution/operator/physical_table_scan.hpp"
 #include "execution/operator/physical_filter.hpp"
 #include "execution/operator/physical_projection.hpp"
@@ -217,11 +221,43 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanLimit(const LogicalLimit&
 }
 
 // ---------------------------------------------------------------------------
-// PlanSort — passthrough (ORDER BY execution deferred)
+// PlanSort — two-pipeline SINK+SOURCE pattern (mirrors PlanAggregate)
 // ---------------------------------------------------------------------------
 
 std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanSort(const LogicalSort& node) {
-    return PlanNode(*node.children[0]);
+    // Shared sort buffer between SINK and SOURCE.
+    auto shared_buf = std::make_shared<SortBuffer>();
+
+    // Build SINK operator.
+    auto sink          = std::make_unique<PhysicalSort>();
+    sink->buf          = shared_buf;
+    sink->output_types = node.output_types;
+    sink->output_names = node.output_names;
+
+    const LogicalGet* get = TryFindLogicalGet(node);
+    for (size_t ki = 0; ki < node.sort_keys.size(); ++ki) {
+        if (get) {
+            sink->sort_keys.push_back(
+                RemapColumnRefs(CloneExpr(*node.sort_keys[ki]), get->column_ids));
+        } else {
+            sink->sort_keys.push_back(CloneExpr(*node.sort_keys[ki]));
+        }
+        sink->ascending.push_back(node.ascending[ki]);
+    }
+
+    // Child provides input rows (the scan/filter/projection subtree).
+    sink->children.push_back(PlanNode(*node.children[0]));
+
+    // Build SOURCE operator.
+    auto source          = std::make_unique<PhysicalSortSource>();
+    source->buf          = shared_buf;
+    source->output_types = node.output_types;
+    source->output_names = node.output_names;
+
+    // Attach source as a child of the sink so Executor::BuildPipelines can reach it.
+    sink->source_op = std::move(source);
+
+    return sink;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,12 +407,68 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanInsert(const LogicalInser
     return op;
 }
 
-std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanDelete(const LogicalDelete&) {
-    throw RuntimeError("PhysicalPlanner: DELETE not yet implemented");
+std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanDelete(const LogicalDelete& node) {
+    const LogicalGet* get = TryFindLogicalGet(node);
+
+    auto op = std::make_unique<PhysicalDelete>();
+    op->schema_name  = node.schema_name;
+    op->table_name   = node.table_name;
+    op->output_types = {};
+    op->output_names = {};
+
+    // Extract filter predicate from child filter node (if any).
+    if (!node.children.empty()) {
+        if (const auto* filt = dynamic_cast<const LogicalFilter*>(node.children[0].get())) {
+            if (filt->predicate) {
+                if (get) {
+                    op->predicate = RemapColumnRefs(CloneExpr(*filt->predicate),
+                                                    get->column_ids);
+                } else {
+                    op->predicate = CloneExpr(*filt->predicate);
+                }
+            }
+        }
+    }
+
+    return op;
 }
 
-std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanUpdate(const LogicalUpdate&) {
-    throw RuntimeError("PhysicalPlanner: UPDATE not yet implemented");
+std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanUpdate(const LogicalUpdate& node) {
+    const LogicalGet* get = TryFindLogicalGet(node);
+
+    auto op = std::make_unique<PhysicalUpdate>();
+    op->schema_name    = node.schema_name;
+    op->table_name     = node.table_name;
+    op->update_col_ids = node.update_col_ids;
+    op->output_types   = {};
+    op->output_names   = {};
+
+    // Clone update expressions.
+    for (const auto& e : node.update_exprs) {
+        if (e) {
+            if (get) {
+                op->update_exprs.push_back(RemapColumnRefs(CloneExpr(*e), get->column_ids));
+            } else {
+                op->update_exprs.push_back(CloneExpr(*e));
+            }
+        }
+    }
+
+    // Extract filter predicate from child filter node (if any).
+    if (!node.children.empty()) {
+        if (const auto* filt = dynamic_cast<const LogicalFilter*>(node.children[0].get())) {
+            if (filt->predicate) {
+                if (get) {
+                    op->predicate = RemapColumnRefs(CloneExpr(*filt->predicate),
+                                                    get->column_ids);
+                } else {
+                    op->predicate = CloneExpr(*filt->predicate);
+                }
+            }
+        }
+    }
+
+    return op;
 }
 
 } // namespace cppcoldb

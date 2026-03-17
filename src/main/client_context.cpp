@@ -5,12 +5,84 @@
 #include "planner/binder.hpp"
 #include "planner/optimizer.hpp"
 #include "planner/physical_planner.hpp"
+#include "planner/logical_plan/logical_plan.hpp"
 #include "execution/executor.hpp"
 #include "catalog/catalog.hpp"
 #include "transaction/transaction.hpp"
 #include "common/exception.hpp"
+#include <sstream>
 
 namespace cppcoldb {
+
+// ---------------------------------------------------------------------------
+// Plain EXPLAIN formatter — formats a logical plan tree as indented text.
+// ---------------------------------------------------------------------------
+static std::string FormatLogicalPlan(const LogicalPlan& node, int depth = 0) {
+    std::string indent(static_cast<size_t>(depth * 2), ' ');
+    std::ostringstream oss;
+
+    switch (node.node_type) {
+        case LogicalPlan::Type::GET: {
+            const auto& g = static_cast<const LogicalGet&>(node);
+            oss << indent << "Scan " << g.schema_name << "." << g.table_name;
+            break;
+        }
+        case LogicalPlan::Type::FILTER:
+            oss << indent << "Filter";
+            break;
+        case LogicalPlan::Type::PROJECTION:
+            oss << indent << "Projection";
+            break;
+        case LogicalPlan::Type::LIMIT: {
+            const auto& l = static_cast<const LogicalLimit&>(node);
+            oss << indent << "Limit";
+            if (l.limit >= 0)  oss << " limit=" << l.limit;
+            if (l.offset > 0)  oss << " offset=" << l.offset;
+            break;
+        }
+        case LogicalPlan::Type::SORT:
+            oss << indent << "Sort";
+            break;
+        case LogicalPlan::Type::AGGREGATE:
+            oss << indent << "Aggregate";
+            break;
+        case LogicalPlan::Type::JOIN:
+            oss << indent << "HashJoin";
+            break;
+        case LogicalPlan::Type::INSERT: {
+            const auto& ins = static_cast<const LogicalInsert&>(node);
+            oss << indent << "Insert " << ins.schema_name << "." << ins.table_name;
+            break;
+        }
+        case LogicalPlan::Type::DELETE: {
+            const auto& del = static_cast<const LogicalDelete&>(node);
+            oss << indent << "Delete " << del.schema_name << "." << del.table_name;
+            break;
+        }
+        case LogicalPlan::Type::UPDATE: {
+            const auto& upd = static_cast<const LogicalUpdate&>(node);
+            oss << indent << "Update " << upd.schema_name << "." << upd.table_name;
+            break;
+        }
+        case LogicalPlan::Type::CREATE_TABLE: {
+            const auto& ct = static_cast<const LogicalCreateTable&>(node);
+            oss << indent << "CreateTable " << ct.schema_name << "." << ct.table_name;
+            break;
+        }
+        case LogicalPlan::Type::DROP_TABLE: {
+            const auto& dt = static_cast<const LogicalDropTable&>(node);
+            oss << indent << "DropTable " << dt.schema_name << "." << dt.table_name;
+            break;
+        }
+        default:
+            oss << indent << "Unknown";
+            break;
+    }
+    for (const auto& child : node.children) {
+        oss << "\n" << FormatLogicalPlan(*child, depth + 1);
+    }
+    return oss.str();
+}
 
 QueryResult ClientContext::Query(const std::string& sql) {
     bool explain_analyze = false;
@@ -35,6 +107,29 @@ QueryResult ClientContext::Query(const std::string& sql) {
         auto stmt = parser.Parse();
 
         if (profiling_enabled_) profiler_.EndPhase(QueryPhase::PARSE);
+
+        // --- Plain EXPLAIN intercept (no ANALYZE) ---
+        if (auto* explain = dynamic_cast<ExplainStatement*>(stmt.get())) {
+            if (!explain->analyze && explain->inner) {
+                if (profiling_enabled_) profiler_.EndQuery(); // discard partial profile
+                Binder binder_ex(*catalog, *transaction);
+                auto logical_ex = binder_ex.Bind(*explain->inner);
+                std::string plan_text = FormatLogicalPlan(*logical_ex);
+                QueryResult r;
+                r.success      = true;
+                r.column_names = {"QUERY PLAN"};
+                r.column_types = {TypeId::VARCHAR};
+                DataChunk chunk;
+                chunk.Initialize({TypeId::VARCHAR});
+                chunk.count = 1;
+                chunk.columns[0].str_data.resize(1);
+                chunk.columns[0].str_data[0] = std::move(plan_text);
+                chunk.columns[0].validity.set(0);
+                chunk.columns[0].count = 1;
+                r.chunks.push_back(std::move(chunk));
+                return r;
+            }
+        }
 
         // --- EXPLAIN ANALYZE intercept ---
         ParsedStatement* inner_stmt = stmt.get();

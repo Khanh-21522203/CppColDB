@@ -20,6 +20,15 @@ bool CheckpointManager::CreateCheckpoint() {
     }
 
     is_checkpointing_ = true;
+    struct CheckpointFlagReset {
+        bool& flag;
+        ~CheckpointFlagReset() { flag = false; }
+    } flag_reset{is_checkpointing_};
+
+    // Skip checkpoints while any uncommitted row versions exist.
+    if (catalog_.HasUncommittedVersionMarkers()) {
+        return false;
+    }
 
     // Write WAL checkpoint marker and flush before touching block storage.
     wal_.WriteCheckpointMarker();
@@ -33,6 +42,9 @@ bool CheckpointManager::CreateCheckpoint() {
         handle = bm_.Pin(0);
     }
 
+    // Flush pending row data to compressed segments before serializing.
+    catalog_.FlushAllRowGroups();
+
     // Serialize catalog metadata into the block buffer.
     catalog_.Serialize(handle.Data(), bm_.BlockSize());
 
@@ -45,7 +57,6 @@ bool CheckpointManager::CreateCheckpoint() {
     // Truncate the WAL — entries before the last checkpoint marker are now safe to drop.
     wal_.Truncate();
 
-    is_checkpointing_ = false;
     return true;
 }
 

@@ -24,6 +24,12 @@ public:
     // Stub always returns false until Phase 7 implements LogicalExpr.
     bool ZoneMapExcludes() const { return false; }
 
+    // Like Scan, but also fills offsets_out with the row_group-relative row offset
+    // for each row in the returned chunk (after MVCC visibility filter).
+    size_t ScanBatchWithOffsets(size_t& row_offset, const std::vector<size_t>& col_ids,
+                                 DataChunk& chunk, std::vector<uint32_t>& offsets_out,
+                                 const Transaction& tx);
+
     // Append rows from chunk (for the given column indices).
     // If tx_id != INVALID_TRANSACTION, marks rows as uncommitted INSERTs.
     void Append(const DataChunk& chunk, const std::vector<size_t>& col_ids,
@@ -41,6 +47,7 @@ public:
     uint32_t     RowGroupId()   const { return row_group_id_; }
     size_t       RowCount()    const { return row_count_; }
     VersionInfo& GetVersionInfo()    { return *version_info_; }
+    const VersionInfo& GetVersionInfo() const { return *version_info_; }
 
     // For checkpoint serialization / deserialization.
     const std::vector<ColumnChunk>& ColumnChunks() const { return column_chunks_; }

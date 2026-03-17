@@ -46,6 +46,12 @@ OperatorResultType PhysicalCreateTable::GetData(OperatorState& raw_state,
         ue.schema     = schema_name;
         ue.table      = table_name;
         ue.was_create = true;
+        ue.col_names.reserve(columns.size());
+        ue.col_types.reserve(columns.size());
+        for (const auto& col : columns) {
+            ue.col_names.push_back(col.name);
+            ue.col_types.push_back(col.type);
+        }
         ctx.transaction->undo_buffer.PushCatalogEntry(std::move(ue));
     }
 

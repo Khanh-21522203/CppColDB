@@ -36,6 +36,11 @@ public:
     // Truncate pending_data_ to `new_count` rows (used by RevertAppend).
     void TruncatePending(size_t new_count);
 
+    // Overwrite a single row's value in-place.
+    // Segment-backed rows are decompressed/recompressed into their existing block.
+    // row_offset is the column-chunk-absolute row index.
+    void WriteRow(uint32_t row_offset, const DataVector& src, size_t src_idx);
+
     TypeId              type()            const { return type_; }
     size_t              RowCount()        const;
     size_t              SegmentRowCount() const;

@@ -142,6 +142,51 @@ void Catalog::RollbackDrop(const std::string& schema, const std::string& name,
     if (s) s->RollbackDrop(name, tx_id);
 }
 
+void Catalog::FlushAllRowGroups() {
+    // Collect committed tables under lock, then flush row groups outside the lock.
+    std::vector<TableCatalogEntry*> tables;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (const auto& [sname, schema] : schemas_) {
+            for (const auto& [tname, versions] : schema->Entries()) {
+                for (const auto& entry_ptr : versions) {
+                    auto* tbl = dynamic_cast<TableCatalogEntry*>(entry_ptr.get());
+                    if (!tbl) continue;
+                    if (tbl->create_commit_time == INVALID_TIMESTAMP) continue;
+                    if (tbl->delete_commit_time != INVALID_TIMESTAMP) continue;
+                    tables.push_back(tbl);
+                }
+            }
+        }
+    }
+    for (auto* tbl : tables) {
+        for (auto& rg : tbl->row_groups) {
+            if (rg->GetVersionInfo().HasUncommittedMarkers()) {
+                continue;
+            }
+            rg->Flush();
+        }
+    }
+}
+
+bool Catalog::HasUncommittedVersionMarkers() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (const auto& [_, schema] : schemas_) {
+        for (const auto& [_, versions] : schema->Entries()) {
+            for (const auto& entry_ptr : versions) {
+                auto* tbl = dynamic_cast<TableCatalogEntry*>(entry_ptr.get());
+                if (!tbl) continue;
+                if (tbl->create_commit_time == INVALID_TIMESTAMP) continue;
+                if (tbl->delete_commit_time != INVALID_TIMESTAMP) continue;
+                for (const auto& rg : tbl->row_groups) {
+                    if (rg->GetVersionInfo().HasUncommittedMarkers()) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 void Catalog::Serialize(uint8_t* block, size_t /*block_size*/) const {
     std::lock_guard<std::mutex> lk(mu_);
     uint8_t* p = block;
@@ -274,8 +319,9 @@ void Catalog::Deserialize(const uint8_t* block, size_t /*block_size*/) {
 
             // Create empty table in catalog.
             CreateTable(sname, tname, cols, sys_tx);
-            // Immediately commit it as always visible (commit_time = 1).
-            CommitEntry(sname, tname, INVALID_TRANSACTION, 1);
+            // commit_time = 0 so IsCatalogEntryVisible (create_commit_time < tx.start_time)
+            // holds for every transaction whose start_time >= 1 (the minimum).
+            CommitEntry(sname, tname, INVALID_TRANSACTION, 0);
 
             // Retrieve the freshly created entry and populate row groups.
             std::lock_guard<std::mutex> lk(mu_);

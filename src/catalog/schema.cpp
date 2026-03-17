@@ -63,7 +63,10 @@ void Schema::CommitEntry(const std::string& name, TransactionId tx_id,
             entry->create_commit_time == INVALID_TIMESTAMP) {
             entry->create_commit_time = commit_time;
         }
-        if (entry->delete_tx_id == tx_id &&
+        // Only commit a delete marker if the tx actually performed a DROP.
+        // Guard against INVALID_TRANSACTION (used by Deserialize for creates).
+        if (tx_id != INVALID_TRANSACTION &&
+            entry->delete_tx_id == tx_id &&
             entry->delete_commit_time == INVALID_TIMESTAMP) {
             entry->delete_commit_time = commit_time;
         }

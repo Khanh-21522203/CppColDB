@@ -34,6 +34,11 @@ public:
     void DropTable(const std::string& schema, const std::string& name,
                    const Transaction& tx);
 
+    // Flush all committed row groups' pending data to compressed segments.
+    // Must be called before Serialize() to ensure pending rows are persisted.
+    void FlushAllRowGroups();
+    bool HasUncommittedVersionMarkers() const;
+
     // Checkpoint: write catalog metadata to a raw block buffer.
     void Serialize(uint8_t* block, size_t block_size) const;
 

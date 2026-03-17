@@ -58,6 +58,49 @@ size_t RowGroup::Scan(size_t& row_offset, const std::vector<size_t>& col_ids,
     return chunk.count;
 }
 
+size_t RowGroup::ScanBatchWithOffsets(size_t& row_offset,
+                                       const std::vector<size_t>& col_ids,
+                                       DataChunk& chunk,
+                                       std::vector<uint32_t>& offsets_out,
+                                       const Transaction& tx) {
+    if (row_offset >= row_count_) return 0;
+
+    size_t rows_to_read = std::min(STANDARD_VECTOR_SIZE, row_count_ - row_offset);
+
+    std::vector<TypeId> out_types;
+    out_types.reserve(col_ids.size());
+    for (size_t c : col_ids) out_types.push_back(col_types_[c]);
+
+    chunk.Initialize(out_types);
+
+    for (size_t ci = 0; ci < col_ids.size(); ++ci) {
+        ColumnScanState state = column_chunks_[col_ids[ci]].MakeScanState(row_offset);
+        column_chunks_[col_ids[ci]].Scan(state, rows_to_read, chunk.columns[ci]);
+    }
+    chunk.count = rows_to_read;
+
+    // Apply MVCC + collect per-row offsets.
+    std::vector<uint32_t> selection;
+    selection.reserve(rows_to_read);
+    offsets_out.clear();
+    for (size_t i = 0; i < rows_to_read; ++i) {
+        if (version_info_->IsVisible(static_cast<uint32_t>(row_offset + i), tx)) {
+            selection.push_back(static_cast<uint32_t>(i));
+            offsets_out.push_back(static_cast<uint32_t>(row_offset + i));
+        }
+    }
+
+    if (selection.size() < rows_to_read) {
+        DataChunk filtered;
+        filtered.Initialize(out_types);
+        DataChunkSlice(filtered, chunk, selection);
+        chunk = std::move(filtered);
+    }
+
+    row_offset += rows_to_read;
+    return chunk.count;
+}
+
 void RowGroup::Append(const DataChunk& chunk, const std::vector<size_t>& col_ids,
                       TransactionId tx_id) {
     pending_append_start_ = row_count_;

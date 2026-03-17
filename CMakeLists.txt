@@ -121,3 +121,9 @@ add_phase_tests(test_phase10
     test/profiler/test_phase10_main.cpp
     test/profiler/test_query_profiler.cpp
 )
+
+# Integration — End-to-end tests
+add_phase_tests(test_integration
+    test/integration/test_integration_main.cpp
+    test/integration/test_end_to_end.cpp
+)

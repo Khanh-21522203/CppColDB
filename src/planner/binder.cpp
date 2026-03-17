@@ -99,9 +99,33 @@ std::unique_ptr<LogicalPlan> Binder::BindSelect(const SelectStatement& stmt) {
     if (has_agg) {
         source_owned = BindAggregateSelect(stmt, ctx, std::move(source_owned));
         // BindAggregateSelect returns a LogicalProjection on top of LogicalAggregate.
-        // Skip the normal select-list binding below and jump to LIMIT/ORDER BY.
+        // Skip the normal select-list binding below and jump to ORDER BY/LIMIT.
         std::unique_ptr<LogicalPlan> top_owned = std::move(source_owned);
 
+        if (!stmt.order_by.empty()) {
+            // Aggregate ORDER BY is bound against post-aggregate output columns.
+            BindContext out_ctx;
+            out_ctx.AddTable(0, "__result__", top_owned->output_names, top_owned->output_types);
+
+            auto sort = std::make_unique<LogicalSort>();
+            for (size_t i = 0; i < stmt.order_by.size(); ++i) {
+                try {
+                    sort->sort_keys.push_back(BindExpr(*stmt.order_by[i], out_ctx));
+                } catch (const BindError&) {
+                    if (stmt.order_by[i]->kind != Expr::Kind::COLUMN_REF) throw;
+                    const auto& cref = static_cast<const ColumnRefExpr&>(*stmt.order_by[i]);
+                    if (cref.table_name.empty()) throw;
+                    ColumnRefExpr unqualified;
+                    unqualified.column_name = cref.column_name;
+                    sort->sort_keys.push_back(BindExpr(unqualified, out_ctx));
+                }
+                sort->ascending.push_back(stmt.order_asc[i]);
+            }
+            sort->output_types = top_owned->output_types;
+            sort->output_names = top_owned->output_names;
+            sort->children.push_back(std::move(top_owned));
+            top_owned = std::move(sort);
+        }
         if (stmt.limit.has_value()) {
             if (*stmt.limit < 0) throw BindError("LIMIT must be non-negative");
             auto lim = std::make_unique<LogicalLimit>();
@@ -111,17 +135,6 @@ std::unique_ptr<LogicalPlan> Binder::BindSelect(const SelectStatement& stmt) {
             lim->output_names = top_owned->output_names;
             lim->children.push_back(std::move(top_owned));
             top_owned = std::move(lim);
-        }
-        if (!stmt.order_by.empty()) {
-            auto sort = std::make_unique<LogicalSort>();
-            for (size_t i = 0; i < stmt.order_by.size(); ++i) {
-                sort->sort_keys.push_back(BindExpr(*stmt.order_by[i], ctx));
-                sort->ascending.push_back(stmt.order_asc[i]);
-            }
-            sort->output_types = top_owned->output_types;
-            sort->output_names = top_owned->output_names;
-            sort->children.push_back(std::move(top_owned));
-            top_owned = std::move(sort);
         }
         return top_owned;
     }
@@ -155,7 +168,22 @@ std::unique_ptr<LogicalPlan> Binder::BindSelect(const SelectStatement& stmt) {
         }
     }
 
-    // Step 6: build LogicalProjection
+    // Step 6: ORDER BY — placed BEFORE projection so sort keys reference the full
+    // table column space (all columns still available at this point).
+    if (!stmt.order_by.empty()) {
+        auto sort = std::make_unique<LogicalSort>();
+        for (size_t i = 0; i < stmt.order_by.size(); ++i) {
+            sort->sort_keys.push_back(BindExpr(*stmt.order_by[i], ctx));
+            sort->ascending.push_back(stmt.order_asc[i]);
+        }
+        sort->output_types = source_owned->output_types;
+        sort->output_names = source_owned->output_names;
+        sort->children.push_back(std::move(source_owned));
+        source_owned = std::move(sort);
+    }
+
+    // Step 7: build LogicalProjection (wraps sort, if any, so ORDER BY key columns
+    // are available to the sort operator before they are projected away).
     auto proj = std::make_unique<LogicalProjection>();
     proj->exprs        = std::move(proj_exprs);
     proj->output_types = proj_types;
@@ -164,7 +192,7 @@ std::unique_ptr<LogicalPlan> Binder::BindSelect(const SelectStatement& stmt) {
 
     std::unique_ptr<LogicalPlan> top_owned = std::move(proj);
 
-    // Step 7: LIMIT / OFFSET
+    // Step 8: LIMIT / OFFSET
     if (stmt.limit.has_value()) {
         if (*stmt.limit < 0) {
             throw BindError("LIMIT must be non-negative");
@@ -176,19 +204,6 @@ std::unique_ptr<LogicalPlan> Binder::BindSelect(const SelectStatement& stmt) {
         lim->output_names = top_owned->output_names;
         lim->children.push_back(std::move(top_owned));
         top_owned = std::move(lim);
-    }
-
-    // Step 8: ORDER BY
-    if (!stmt.order_by.empty()) {
-        auto sort = std::make_unique<LogicalSort>();
-        for (size_t i = 0; i < stmt.order_by.size(); ++i) {
-            sort->sort_keys.push_back(BindExpr(*stmt.order_by[i], ctx));
-            sort->ascending.push_back(stmt.order_asc[i]);
-        }
-        sort->output_types = top_owned->output_types;
-        sort->output_names = top_owned->output_names;
-        sort->children.push_back(std::move(top_owned));
-        top_owned = std::move(sort);
     }
 
     return top_owned;
@@ -1125,12 +1140,51 @@ std::unique_ptr<LogicalPlan> Binder::BindSelectWithJoin(const SelectStatement& s
             }
         }
 
+        // ORDER BY before projection (same rationale as non-JOIN path: sort key
+        // column indices reference the full join output, not the projected subset).
+        if (!stmt.order_by.empty()) {
+            auto sort = std::make_unique<LogicalSort>();
+            for (size_t i = 0; i < stmt.order_by.size(); ++i) {
+                sort->sort_keys.push_back(BindExpr(*stmt.order_by[i], ctx));
+                sort->ascending.push_back(stmt.order_asc[i]);
+            }
+            sort->output_types = current_plan->output_types;
+            sort->output_names = current_plan->output_names;
+            sort->children.push_back(std::move(current_plan));
+            current_plan = std::move(sort);
+        }
+
         auto proj = std::make_unique<LogicalProjection>();
         proj->exprs        = std::move(proj_exprs);
         proj->output_types = proj_types;
         proj->output_names = proj_names;
         proj->children.push_back(std::move(current_plan));
         current_plan = std::move(proj);
+    }
+
+    if (has_agg && !stmt.order_by.empty()) {
+        // Aggregate ORDER BY is bound against post-aggregate output columns.
+        BindContext out_ctx;
+        out_ctx.AddTable(0, "__result__", current_plan->output_names, current_plan->output_types);
+
+        auto sort = std::make_unique<LogicalSort>();
+        for (size_t i = 0; i < stmt.order_by.size(); ++i) {
+            try {
+                sort->sort_keys.push_back(BindExpr(*stmt.order_by[i], out_ctx));
+            } catch (const BindError&) {
+                if (stmt.order_by[i]->kind != Expr::Kind::COLUMN_REF) throw;
+                const auto& cref = static_cast<const ColumnRefExpr&>(*stmt.order_by[i]);
+                if (cref.table_name.empty()) throw;
+                ColumnRefExpr unqualified;
+                unqualified.column_name = cref.column_name;
+                sort->sort_keys.push_back(BindExpr(unqualified, out_ctx));
+            }
+            sort->ascending.push_back(stmt.order_asc[i]);
+        }
+        sort->output_types = current_plan->output_types;
+        sort->output_names = current_plan->output_names;
+        sort->children.push_back(std::move(current_plan));
+        current_plan = std::move(sort);
     }
 
     // LIMIT / OFFSET.
@@ -1143,19 +1197,6 @@ std::unique_ptr<LogicalPlan> Binder::BindSelectWithJoin(const SelectStatement& s
         lim->output_names = current_plan->output_names;
         lim->children.push_back(std::move(current_plan));
         current_plan = std::move(lim);
-    }
-
-    // ORDER BY.
-    if (!stmt.order_by.empty()) {
-        auto sort = std::make_unique<LogicalSort>();
-        for (size_t i = 0; i < stmt.order_by.size(); ++i) {
-            sort->sort_keys.push_back(BindExpr(*stmt.order_by[i], ctx));
-            sort->ascending.push_back(stmt.order_asc[i]);
-        }
-        sort->output_types = current_plan->output_types;
-        sort->output_names = current_plan->output_names;
-        sort->children.push_back(std::move(current_plan));
-        current_plan = std::move(sort);
     }
 
     return current_plan;
