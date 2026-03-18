@@ -9,6 +9,7 @@ namespace cppcoldb {
 
 struct HashAggState : OperatorState {
     std::shared_ptr<AggregateHashTable> ht;
+    std::vector<Value> group_key; // reused per row in the GROUP BY path
 };
 
 // SINK: consumes input chunks, building the aggregate hash table.

@@ -165,13 +165,12 @@ size_t ColumnChunk::Scan(ColumnScanState& state, size_t count, DataVector& outpu
             const ColumnSegment& seg = segments_[state.segment_idx];
             BufferHandle handle = bm_.Pin(seg.block_id);
 
-            DataVector seg_vec;
-            Decompress(handle.Data(), bm_.BlockSize(), type_, seg_vec);
+            Decompress(handle.Data(), bm_.BlockSize(), type_, state.scratch);
 
             size_t available = seg.row_count - state.row_in_segment;
             size_t to_copy   = std::min(count - rows_read, available);
 
-            BulkCopyRows(output, seg_vec, state.row_in_segment, to_copy);
+            BulkCopyRows(output, state.scratch, state.row_in_segment, to_copy);
 
             rows_read            += to_copy;
             state.row_in_segment += to_copy;
@@ -266,11 +265,11 @@ void ColumnChunk::ScanRows(const std::vector<uint32_t>& offsets, DataVector& out
 
         if (in_i > batch_begin) {
             BufferHandle handle = bm_.Pin(seg.block_id);
-            DataVector seg_vec;
-            Decompress(handle.Data(), bm_.BlockSize(), type_, seg_vec);
+            DataVector local_scratch;
+            Decompress(handle.Data(), bm_.BlockSize(), type_, local_scratch);
             for (size_t j = batch_begin; j < in_i; ++j) {
                 size_t local = offsets[j] - seg_start;
-                BulkCopyRows(output, seg_vec, local, 1);
+                BulkCopyRows(output, local_scratch, local, 1);
             }
         }
         seg_start = seg_end;

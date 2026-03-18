@@ -10,8 +10,9 @@ class BufferManager;
 
 // Scan cursor for reading from a ColumnChunk.
 struct ColumnScanState {
-    size_t segment_idx    = 0; // current segment (segments_.size() = pending_data_)
-    size_t row_in_segment = 0; // next row to read within current segment
+    size_t     segment_idx    = 0; // current segment (segments_.size() = pending_data_)
+    size_t     row_in_segment = 0; // next row to read within current segment
+    DataVector scratch;            // reused across Scan() calls — avoids per-call heap alloc
 };
 
 // One column's worth of data within a RowGroup.

@@ -1,6 +1,5 @@
 #include "execution/operator/physical_sort.hpp"
 #include "execution/operator/expr_evaluator.hpp"
-#include "execution/aggregate_hash_table.hpp"  // VectorGetValue
 #include "common/exception.hpp"
 
 #include <algorithm>
@@ -16,20 +15,47 @@ int CompareSortRows(const std::vector<std::vector<DataVector>>& keys,
                     const std::pair<size_t, size_t>& a,
                     const std::pair<size_t, size_t>& b) {
     for (size_t ki = 0; ki < keys.size(); ++ki) {
-        Value va = VectorGetValue(keys[ki][a.first], a.second);
-        Value vb = VectorGetValue(keys[ki][b.first], b.second);
+        const DataVector& dva = keys[ki][a.first];
+        const DataVector& dvb = keys[ki][b.first];
 
-        // Deterministic NULL handling: NULLS LAST for both ASC/DESC.
-        if (va.IsNull() || vb.IsNull()) {
-            if (va.IsNull() && vb.IsNull()) {
-                continue;
-            }
-            if (va.IsNull()) return 1;
-            return -1;
+        bool a_null = dva.IsNull(a.second);
+        bool b_null = dvb.IsNull(b.second);
+        if (a_null || b_null) {
+            if (a_null && b_null) continue;
+            return a_null ? 1 : -1;
         }
 
-        if (va < vb) return asc[ki] ? -1 : 1;
-        if (vb < va) return asc[ki] ? 1 : -1;
+        int cmp = 0;
+        switch (dva.type) {
+            case TypeId::BOOLEAN:
+            case TypeId::INT8:
+            case TypeId::INT16:
+            case TypeId::INT32:
+            case TypeId::INT64: {
+                int64_t ia = dva.int_data[a.second];
+                int64_t ib = dvb.int_data[b.second];
+                if (ia < ib) cmp = -1;
+                else if (ia > ib) cmp = 1;
+                break;
+            }
+            case TypeId::FLOAT32:
+            case TypeId::FLOAT64: {
+                double fa = dva.float_data[a.second];
+                double fb = dvb.float_data[b.second];
+                if (fa < fb) cmp = -1;
+                else if (fa > fb) cmp = 1;
+                break;
+            }
+            case TypeId::VARCHAR: {
+                const std::string& sa = dva.str_data[a.second];
+                const std::string& sb = dvb.str_data[b.second];
+                if (sa < sb) cmp = -1;
+                else if (sa > sb) cmp = 1;
+                break;
+            }
+            default: break;
+        }
+        if (cmp != 0) return asc[ki] ? cmp : -cmp;
     }
 
     // Stable tie-break by original row order.

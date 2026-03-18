@@ -36,7 +36,11 @@ It is an embedded database engine, not a separate server process. Applications c
   - Zone-map segment skipping (min/max stats per segment)
   - Late materialization (filter columns scanned first; payload deferred to passing rows)
   - Vectorized hash join probe (batch hash over typed arrays, no `Value` boxing)
-  - O(1) MVCC fast path (counter-based `AllInsertedVisibleTo` skips per-row map lookups on clean scans)
+  - O(1) MVCC fast path (`AllInsertedVisibleTo` skips per-row map lookups on clean scans)
+  - Scratch `DataVector` in `ColumnScanState` (eliminates per-segment heap alloc in `Scan`)
+  - Scalar aggregate fast path (no GROUP BY: one hash lookup per chunk, batch `count +=`)
+  - Typed sort comparison (direct `int64`/`double`/`string` compare, no `Value` boxing)
+  - Reusable `group_key` in `HashAggState` (pre-sized once, overwritten in-place per row)
 
 ## Architecture At A Glance
 
@@ -84,7 +88,7 @@ Persistent mode:
 ./build/cppcoldb /tmp/mydb
 ```
 
-REPL accepts one SQL statement per line. Exit with `exit`, `quit`, or `\\q`.
+REPL accepts one SQL statement per line. Exit with `exit`, `quit`, or `\q`.
 
 ## Test
 
@@ -104,9 +108,9 @@ CMake defines phase targets plus integration target:
 Build and run the built-in benchmark harness:
 
 ```bash
-cmake -S . -B build
-cmake --build build -j --target benchmark_cppcoldb
-./build/benchmark_cppcoldb --rows 20000 --warmup 3 --iters 15
+cmake -S . -B build_release -DCMAKE_BUILD_TYPE=Release
+cmake --build build_release -j --target benchmark_cppcoldb
+./build_release/benchmark_cppcoldb --rows 100000 --warmup 3 --iters 15
 ```
 
 Useful flags:
@@ -130,24 +134,18 @@ ROWS=200000 WARMUP=4 ITERS=12 ./scripts/run_benchmark.sh
 DB_PATH=/tmp/cppcoldb_bench ./scripts/run_benchmark.sh
 ```
 
-Sample statistics:
+Sample statistics (100K rows, Release build):
 
-```bash
-cmake -S . -B build_release -DCMAKE_BUILD_TYPE=Release
-cmake --build build_release -j --target benchmark_cppcoldb
-./build_release/benchmark_cppcoldb --rows 100000 --warmup 2 --iters 8
-```
-
-| Case | avg_ms | p50 | p95 | min | max | qps |
-|---|---:|---:|---:|---:|---:|---:|
-| `read.count_scan` | 1.780 | 1.760 | 1.887 | 1.731 | 1.917 | 561.754 |
-| `read.filter_count` | 1.212 | 1.213 | 1.221 | 1.201 | 1.229 | 825.123 |
-| `read.join_orderby_limit` | 19.576 | 19.420 | 20.284 | 19.216 | 20.412 | 51.084 |
-| `read.orderby_limit` | 3.087 | 3.037 | 3.462 | 2.868 | 3.661 | 323.969 |
-| `read.filter_project` | 1.772 | 1.710 | 1.978 | 1.645 | 2.066 | 564.435 |
-| `write.insert_rollback` | 0.224 | 0.223 | 0.236 | 0.214 | 0.250 | 4467.196 |
-| `write.update_rollback` | 5.989 | 5.910 | 6.621 | 5.564 | 6.730 | 166.983 |
-| `write.delete_rollback` | 2.694 | 2.602 | 3.224 | 2.487 | 3.307 | 371.247 |
+| Case                        | avg_ms  | p50     | p95     | min     | max     | qps      |
+|-----------------------------|--------:|--------:|--------:|--------:|--------:|---------:|
+| `read.count_scan`           |   1.346 |   1.346 |   1.353 |   1.333 |   1.360 |  743.009 |
+| `read.filter_count`         |   1.070 |   1.068 |   1.086 |   1.056 |   1.099 |  934.891 |
+| `read.join_orderby_limit`   |  13.862 |  13.796 |  14.312 |  13.451 |  14.406 |   72.142 |
+| `read.orderby_limit`        |   2.276 |   2.256 |   2.409 |   2.199 |   2.443 |  439.305 |
+| `read.filter_project`       |   1.731 |   1.701 |   1.885 |   1.664 |   1.899 |  577.678 |
+| `write.insert_rollback`     |   0.215 |   0.214 |   0.222 |   0.209 |   0.223 | 4651.441 |
+| `write.update_rollback`     |   5.832 |   5.713 |   6.378 |   5.492 |   6.478 |  171.462 |
+| `write.delete_rollback`     |   2.663 |   2.652 |   2.822 |   2.538 |   2.877 |  375.452 |
 
 ## Repository Layout
 
