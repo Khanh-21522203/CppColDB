@@ -127,3 +127,10 @@ add_phase_tests(test_integration
     test/integration/test_integration_main.cpp
     test/integration/test_end_to_end.cpp
 )
+
+# Benchmark executable (not a ctest target)
+add_executable(benchmark_cppcoldb
+    test/benchmark/benchmark_main.cpp
+)
+target_link_libraries(benchmark_cppcoldb PRIVATE cppcoldb_lib)
+target_include_directories(benchmark_cppcoldb PRIVATE src/)
