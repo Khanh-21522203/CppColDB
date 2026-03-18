@@ -1,77 +1,121 @@
 # CppColDB
 
-CppColDB is a C++20 learning project for building a column-oriented relational database from scratch.
+CppColDB is a C++20 learning project that builds a small column-oriented relational database from scratch.
 
-Current state: repository scaffold and architecture/planning docs are in place, with a minimal executable entry point.
+It is an embedded database engine, not a separate server process. Applications create a `Database` object and use `Connection` objects in-process.
 
-## Goals
+## What Is Implemented
 
-- Build a columnar storage engine
-- Implement a SQL parser, planner, optimizer, and vectorized executor
-- Add transaction support (MVCC), WAL, checkpointing, and profiling
+- SQL parser and AST for:
+  - `SELECT`, `INSERT`, `UPDATE`, `DELETE`
+  - `CREATE TABLE`, `DROP TABLE`
+  - `BEGIN`, `COMMIT`, `ROLLBACK`
+  - `EXPLAIN`, `EXPLAIN ANALYZE`
+- Query pipeline:
+  - Binder (semantic analysis)
+  - Logical optimizer (predicate pushdown, column pruning, constant folding)
+  - Physical planner
+  - Vectorized executor with pipeline dependencies
+- Physical operators:
+  - Table scan, filter, projection, limit
+  - Hash aggregation
+  - Hash join
+  - Sort (`ORDER BY`) with sink/source two-pipeline pattern
+  - Mutation operators for `INSERT/UPDATE/DELETE` and DDL
+- Storage and durability:
+  - Columnar storage (`RowGroup` + `ColumnChunk` + compressed segments)
+  - MVCC visibility markers
+  - WAL write/replay (`INSERT/DELETE/UPDATE/DDL`)
+  - Checkpointing and WAL truncation
+- Query profiling infrastructure and phase/operator profiling tests
 
-## Project Layout
+## Architecture At A Glance
 
-```text
-.
-├── CMakeLists.txt
-├── main.cpp
-├── src/                 # Database engine source tree (feature modules)
-├── test/                # Unit/integration test tree
-├── plans/               # Implementation plans by subsystem
-├── flows/               # Mermaid architecture and flow diagrams
-└── tasks/               # Working task notes
-```
+Request flow for a query:
 
-## Prerequisites
+`Connection::Query -> ClientContext::Query -> Parser -> Binder -> Optimizer -> PhysicalPlanner -> Executor/PipelineExecutor -> QueryResult`
 
-- CMake 3.20+
-- C++20 compiler (GCC/Clang/MSVC with C++20 support)
-- A build tool supported by CMake (Ninja or Make)
+Core storage flow:
+
+`Catalog -> Table -> RowGroup -> ColumnChunk -> Segment blocks (via BufferManager/BlockFile)`
+
+Durability flow:
+
+`TransactionManager::Commit -> Transaction::WriteToWAL -> WAL::Flush -> commit-time apply -> CheckpointManager`
+
+Recovery flow:
+
+`Database startup -> Catalog deserialize from checkpoint block -> WAL replay after last checkpoint marker`
 
 ## Build
+
+Requirements:
+
+- CMake 3.20+
+- C++20 compiler (GCC/Clang/MSVC)
+
+Commands:
 
 ```bash
 cmake -S . -B build
 cmake --build build -j
 ```
 
-Notes:
-- `cppcoldb_lib` is built from `src/*.cpp` recursively when source files exist.
-- If `src/` has no `.cpp` yet, CMake falls back to an interface target so configure/build still succeed.
-
 ## Run
+
+In-memory mode:
 
 ```bash
 ./build/cppcoldb
 ```
 
-Current output:
+Persistent mode:
 
-```text
-Hello, World!
+```bash
+./build/cppcoldb /tmp/mydb
 ```
 
+REPL accepts one SQL statement per line. Exit with `exit`, `quit`, or `\\q`.
+
 ## Test
+
+Run full test suite:
 
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-The phase test targets in `CMakeLists.txt` are currently commented out. As you implement each phase, uncomment the corresponding `add_phase_tests(...)` block.
+CMake defines phase targets plus integration target:
 
-## Roadmap and Design Docs
+- `test_phase0` ... `test_phase10`
+- `test_integration`
 
-- Implementation order and dependencies: `plans/plan-implementation-guide.md`
-- Component plans: `plans/`
-- Architecture/flow diagrams: `flows/README.md`
+## Repository Layout
 
-## Development Notes
-
-- Keep changes small and phase-focused.
-- Add tests for each subsystem as it is implemented.
-- Reconfigure after adding/removing source files:
-
-```bash
-cmake -S . -B build
+```text
+.
+├── CMakeLists.txt
+├── main.cpp
+├── src/
+│   ├── common/
+│   ├── parser/
+│   ├── planner/
+│   ├── execution/
+│   ├── storage/
+│   ├── catalog/
+│   ├── transaction/
+│   ├── checkpoint/
+│   ├── parallel/
+│   ├── profiler/
+│   └── main/
+├── test/
+├── plans/
+├── flows/
+└── tasks/
 ```
+
+## Notes
+
+- This project is intended for learning and experimentation, not production use.
+- Design docs and implementation plans are in `plans/`.
+- Architecture diagrams are in `flows/`.
