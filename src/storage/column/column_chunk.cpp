@@ -220,6 +220,90 @@ void ColumnChunk::WriteRow(uint32_t row_offset, const DataVector& src, size_t sr
     write_value(pending_data_, pending_idx);
 }
 
+void ColumnChunk::WriteRows(const std::vector<uint32_t>& row_offsets, const DataVector& src) {
+    if (row_offsets.empty()) return;
+    if (src.count != row_offsets.size()) {
+        throw RuntimeError("ColumnChunk::WriteRows: src.count must match row_offsets.size()");
+    }
+
+    for (size_t i = 1; i < row_offsets.size(); ++i) {
+        if (row_offsets[i] < row_offsets[i - 1]) {
+            throw RuntimeError("ColumnChunk::WriteRows: row_offsets must be non-decreasing");
+        }
+    }
+
+    auto write_value = [&](DataVector& target, size_t idx, size_t src_idx) {
+        if (!src.IsNull(src_idx)) {
+            target.validity.set(idx);
+            switch (type_) {
+                case TypeId::BOOLEAN:
+                case TypeId::INT8:
+                case TypeId::INT16:
+                case TypeId::INT32:
+                case TypeId::INT64:
+                    target.int_data[idx] = src.int_data[src_idx];
+                    break;
+                case TypeId::FLOAT32:
+                case TypeId::FLOAT64:
+                    target.float_data[idx] = src.float_data[src_idx];
+                    break;
+                case TypeId::VARCHAR:
+                    target.str_data[idx] = src.str_data[src_idx];
+                    break;
+                default:
+                    break;
+            }
+        } else {
+            target.validity.reset(idx);
+        }
+    };
+
+    size_t src_begin = 0;
+    size_t cur = 0;
+
+    for (size_t seg_idx = 0; seg_idx < segments_.size() && src_begin < row_offsets.size(); ++seg_idx) {
+        auto& seg = segments_[seg_idx];
+        size_t end = cur + seg.row_count;
+
+        size_t src_end = src_begin;
+        while (src_end < row_offsets.size() && row_offsets[src_end] < end) {
+            ++src_end;
+        }
+
+        if (src_end > src_begin) {
+            BufferHandle handle = bm_.Pin(seg.block_id);
+            DataVector seg_vec;
+            Decompress(handle.Data(), bm_.BlockSize(), type_, seg_vec);
+
+            for (size_t i = src_begin; i < src_end; ++i) {
+                size_t idx = static_cast<size_t>(row_offsets[i]) - cur;
+                write_value(seg_vec, idx, i);
+            }
+
+            CompressionChoice choice = SelectCompression(seg_vec);
+            Compress(choice, seg_vec, handle.Data(), bm_.BlockSize());
+            handle.MarkDirty();
+            seg.compression = choice.type;
+            seg.stats = BuildStats(type_, seg_vec);
+        }
+
+        src_begin = src_end;
+        cur = end;
+    }
+
+    // Remaining offsets belong to pending_data_.
+    for (size_t i = src_begin; i < row_offsets.size(); ++i) {
+        if (row_offsets[i] < cur) {
+            throw RuntimeError("ColumnChunk::WriteRows: row_offset out of range");
+        }
+        size_t pending_idx = static_cast<size_t>(row_offsets[i]) - cur;
+        if (pending_idx >= pending_data_.count) {
+            throw RuntimeError("ColumnChunk::WriteRows: row_offset out of range");
+        }
+        write_value(pending_data_, pending_idx, i);
+    }
+}
+
 void ColumnChunk::UpdateCombinedStats(const DataVector& vec, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         if (vec.IsNull(i)) {

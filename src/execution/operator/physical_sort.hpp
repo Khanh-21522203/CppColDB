@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <memory>
 #include <vector>
 #include "execution/physical_operator.hpp"
@@ -26,6 +27,10 @@ struct SortSinkState : OperatorState {
 struct PhysicalSort : PhysicalOperator {
     std::vector<std::unique_ptr<LogicalExpr>> sort_keys;
     std::vector<bool>                         ascending; // parallel to sort_keys
+
+    // If > 0, compute only the smallest top_k rows in sort order.
+    // Used to optimize ORDER BY ... LIMIT/OFFSET.
+    int64_t top_k = -1;
 
     // Shared buffer — also held by PhysicalSortSource.
     std::shared_ptr<SortBuffer> buf;

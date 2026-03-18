@@ -1,5 +1,6 @@
 #pragma once
 #include <memory>
+#include <unordered_map>
 #include <vector>
 #include "planner/logical_plan/logical_plan.hpp"
 #include "execution/physical_operator.hpp"
@@ -36,6 +37,9 @@ private:
 
     // Try to find a LogicalGet in the subtree; returns nullptr if not found (e.g., JOIN/AGGREGATE child).
     static const LogicalGet* TryFindLogicalGet(const LogicalPlan& plan);
+
+    // Optional top-k hints keyed by LogicalSort node address.
+    std::unordered_map<const LogicalSort*, int64_t> top_k_hints_;
 };
 
 } // namespace cppcoldb

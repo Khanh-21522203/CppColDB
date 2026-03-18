@@ -283,6 +283,29 @@ static void TestE2EAggregateJoinOrderBy() {
 }
 
 // ---------------------------------------------------------------------------
+// 8. TestE2EOrderByLimitOffset
+// ---------------------------------------------------------------------------
+static void TestE2EOrderByLimitOffset() {
+    Database db(":memory:");
+    auto conn = db.Connect();
+
+    RunOK(*conn, "CREATE TABLE t (id INT, score INT)");
+    for (int i = 0; i < 10; ++i) {
+        RunOK(*conn, "INSERT INTO t VALUES (" + std::to_string(i) + ", " + std::to_string(i) + ")");
+    }
+
+    QueryResult r = RunOK(*conn,
+        "SELECT id, score FROM t ORDER BY score DESC LIMIT 3 OFFSET 2");
+
+    Check(r.RowCount() == 3, "OrderByLimitOffset: expected 3 rows");
+    Check(GetIntAt(r, 1, 0) == 7, "OrderByLimitOffset: first score should be 7");
+    Check(GetIntAt(r, 1, 1) == 6, "OrderByLimitOffset: second score should be 6");
+    Check(GetIntAt(r, 1, 2) == 5, "OrderByLimitOffset: third score should be 5");
+
+    std::cout << "  TestE2EOrderByLimitOffset PASSED\n";
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 void RunEndToEndTests() {
@@ -293,4 +316,5 @@ void RunEndToEndTests() {
     TestE2EJoinValues();
     TestE2EUpdateRollbackAndPersistedUpdate();
     TestE2EAggregateJoinOrderBy();
+    TestE2EOrderByLimitOffset();
 }

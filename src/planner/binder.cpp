@@ -4,9 +4,47 @@
 #include "transaction/transaction.hpp"
 #include "common/exception.hpp"
 #include "storage/column/row_group.hpp"
+#include <set>
 #include <stdexcept>
 
 namespace cppcoldb {
+
+namespace {
+
+void CollectBoundColumnRefs(const LogicalExpr& expr, std::set<size_t>& cols) {
+    switch (expr.kind) {
+        case LogicalExpr::Kind::BOUND_COLUMN_REF: {
+            const auto& ref = static_cast<const BoundColumnRef&>(expr);
+            cols.insert(ref.column_idx);
+            return;
+        }
+        case LogicalExpr::Kind::BINARY_OP: {
+            const auto& op = static_cast<const LogicalBinaryOp&>(expr);
+            if (op.left) CollectBoundColumnRefs(*op.left, cols);
+            if (op.right) CollectBoundColumnRefs(*op.right, cols);
+            return;
+        }
+        case LogicalExpr::Kind::UNARY_OP: {
+            const auto& op = static_cast<const LogicalUnaryOp&>(expr);
+            if (op.child) CollectBoundColumnRefs(*op.child, cols);
+            return;
+        }
+        case LogicalExpr::Kind::CAST: {
+            const auto& c = static_cast<const LogicalCast&>(expr);
+            if (c.child) CollectBoundColumnRefs(*c.child, cols);
+            return;
+        }
+        case LogicalExpr::Kind::AGGREGATE: {
+            const auto& aggr = static_cast<const LogicalAggrExpr&>(expr);
+            if (aggr.arg) CollectBoundColumnRefs(*aggr.arg, cols);
+            return;
+        }
+        case LogicalExpr::Kind::LITERAL:
+            return;
+    }
+}
+
+} // namespace
 
 Binder::Binder(Catalog& catalog, Transaction& tx)
     : catalog_(catalog), tx_(tx) {}
@@ -364,33 +402,6 @@ std::unique_ptr<LogicalPlan> Binder::BindUpdate(const UpdateStatement& stmt) {
     BindContext ctx;
     ctx.AddTable(0, stmt.table_name, table->ColumnNames(), table->ColumnTypes());
 
-    // Build scan + optional filter
-    auto get = std::make_unique<LogicalGet>();
-    get->schema_name  = schema_name;
-    get->table_name   = stmt.table_name;
-    for (size_t i = 0; i < table->ColumnCount(); ++i) {
-        get->column_ids.push_back(i);
-    }
-    get->output_types = table->ColumnTypes();
-    get->output_names = table->ColumnNames();
-    for (const auto& rg : table->row_groups) {
-        get->catalog_row_count += rg->RowCount();
-    }
-
-    std::unique_ptr<LogicalPlan> source_owned = std::move(get);
-    if (stmt.where_clause) {
-        auto pred = BindExpr(*stmt.where_clause, ctx);
-        if (pred->result_type != TypeId::BOOLEAN) {
-            throw BindError("WHERE clause must be boolean");
-        }
-        auto filter = std::make_unique<LogicalFilter>();
-        filter->predicate    = std::move(pred);
-        filter->output_types = table->ColumnTypes();
-        filter->output_names = table->ColumnNames();
-        filter->children.push_back(std::move(source_owned));
-        source_owned = std::move(filter);
-    }
-
     // Resolve SET clauses
     std::vector<size_t>                       update_col_ids;
     std::vector<std::unique_ptr<LogicalExpr>> update_exprs;
@@ -402,6 +413,47 @@ std::unique_ptr<LogicalPlan> Binder::BindUpdate(const UpdateStatement& stmt) {
         }
         update_col_ids.push_back(static_cast<size_t>(idx));
         update_exprs.push_back(BindExpr(*clause.value_expr, ctx));
+    }
+
+    std::unique_ptr<LogicalExpr> pred;
+    if (stmt.where_clause) {
+        pred = BindExpr(*stmt.where_clause, ctx);
+        if (pred->result_type != TypeId::BOOLEAN) {
+            throw BindError("WHERE clause must be boolean");
+        }
+    }
+
+    // UPDATE scans only columns needed by WHERE/SET expressions + updated columns.
+    std::set<size_t> required_cols(update_col_ids.begin(), update_col_ids.end());
+    if (pred) {
+        CollectBoundColumnRefs(*pred, required_cols);
+    }
+    for (const auto& expr : update_exprs) {
+        if (expr) CollectBoundColumnRefs(*expr, required_cols);
+    }
+
+    auto get = std::make_unique<LogicalGet>();
+    get->schema_name = schema_name;
+    get->table_name  = stmt.table_name;
+    get->column_ids.assign(required_cols.begin(), required_cols.end());
+    get->output_types.reserve(get->column_ids.size());
+    get->output_names.reserve(get->column_ids.size());
+    for (size_t col_id : get->column_ids) {
+        get->output_types.push_back(table->columns[col_id].type);
+        get->output_names.push_back(table->columns[col_id].name);
+    }
+    for (const auto& rg : table->row_groups) {
+        get->catalog_row_count += rg->RowCount();
+    }
+
+    std::unique_ptr<LogicalPlan> source_owned = std::move(get);
+    if (pred) {
+        auto filter = std::make_unique<LogicalFilter>();
+        filter->predicate    = std::move(pred);
+        filter->output_types = source_owned->output_types;
+        filter->output_names = source_owned->output_names;
+        filter->children.push_back(std::move(source_owned));
+        source_owned = std::move(filter);
     }
 
     auto upd = std::make_unique<LogicalUpdate>();

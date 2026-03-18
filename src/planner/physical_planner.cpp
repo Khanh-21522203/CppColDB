@@ -14,9 +14,33 @@
 #include "execution/operator/physical_hash_join.hpp"
 #include "execution/operator/physical_insert.hpp"
 #include "common/exception.hpp"
+#include <algorithm>
+#include <cstdint>
 #include <unordered_map>
 
 namespace cppcoldb {
+
+namespace {
+
+const LogicalSort* FindTopKSortCandidate(const LogicalPlan* node) {
+    const LogicalPlan* cur = node;
+    while (cur) {
+        if (cur->node_type == LogicalPlan::Type::SORT) {
+            return static_cast<const LogicalSort*>(cur);
+        }
+        // Projection preserves row order/cardinality, so LIMIT can push top-k through it.
+        if (cur->node_type == LogicalPlan::Type::PROJECTION &&
+            cur->children.size() == 1 &&
+            cur->children[0]) {
+            cur = cur->children[0].get();
+            continue;
+        }
+        return nullptr;
+    }
+    return nullptr;
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Helper: try to find a LogicalGet node; nullptr if none (JOIN/AGGREGATE child)
@@ -209,7 +233,25 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanProjection(
 // ---------------------------------------------------------------------------
 
 std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanLimit(const LogicalLimit& node) {
-    auto child = PlanNode(*node.children[0]);
+    std::unique_ptr<PhysicalOperator> child;
+    const LogicalSort* hinted_sort = nullptr;
+    if (!node.children.empty() && node.children[0] && node.limit >= 0) {
+        hinted_sort = FindTopKSortCandidate(node.children[0].get());
+        if (hinted_sort) {
+            int64_t eff_offset = std::max<int64_t>(0, node.offset);
+            int64_t top_k = node.limit;
+            if (top_k > INT64_MAX - eff_offset) {
+                top_k = INT64_MAX;
+            } else {
+                top_k += eff_offset;
+            }
+            top_k_hints_[hinted_sort] = top_k;
+        }
+    }
+    child = PlanNode(*node.children[0]);
+    if (hinted_sort) {
+        top_k_hints_.erase(hinted_sort);
+    }
 
     auto op = std::make_unique<PhysicalLimit>();
     op->limit        = node.limit;
@@ -231,6 +273,8 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanSort(const LogicalSort& n
     // Build SINK operator.
     auto sink          = std::make_unique<PhysicalSort>();
     sink->buf          = shared_buf;
+    auto hint_it = top_k_hints_.find(&node);
+    sink->top_k        = (hint_it != top_k_hints_.end()) ? hint_it->second : -1;
     sink->output_types = node.output_types;
     sink->output_names = node.output_names;
 
@@ -440,6 +484,11 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanUpdate(const LogicalUpdat
     op->schema_name    = node.schema_name;
     op->table_name     = node.table_name;
     op->update_col_ids = node.update_col_ids;
+    if (get) {
+        op->scan_col_ids = get->column_ids;
+    } else {
+        op->scan_col_ids = node.update_col_ids;
+    }
     op->output_types   = {};
     op->output_names   = {};
 

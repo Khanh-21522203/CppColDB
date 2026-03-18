@@ -13,6 +13,10 @@ struct PhysicalUpdate : PhysicalOperator {
     // Columns to update (indices in the table's column list).
     std::vector<size_t> update_col_ids;
 
+    // Columns scanned from storage for predicate/expression evaluation.
+    // Order matches the input chunk schema for predicate/update_exprs.
+    std::vector<size_t> scan_col_ids;
+
     // Expressions that produce new values (parallel to update_col_ids).
     // Each expression is evaluated against the full row of the table.
     std::vector<std::unique_ptr<LogicalExpr>> update_exprs;

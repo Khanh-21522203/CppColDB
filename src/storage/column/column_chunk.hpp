@@ -41,6 +41,11 @@ public:
     // row_offset is the column-chunk-absolute row index.
     void WriteRow(uint32_t row_offset, const DataVector& src, size_t src_idx);
 
+    // Overwrite multiple rows in one call.
+    // `row_offsets.size()` must equal `src.count`; src row i is written to row_offsets[i].
+    // Offsets should be in non-decreasing order for best performance.
+    void WriteRows(const std::vector<uint32_t>& row_offsets, const DataVector& src);
+
     TypeId              type()            const { return type_; }
     size_t              RowCount()        const;
     size_t              SegmentRowCount() const;

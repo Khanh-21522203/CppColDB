@@ -10,6 +10,7 @@
 #include "transaction/undo_buffer.hpp"
 #include "common/exception.hpp"
 #include "common/types.hpp"
+#include <unordered_map>
 
 namespace cppcoldb {
 
@@ -32,10 +33,16 @@ OperatorResultType PhysicalUpdate::GetData(OperatorState& raw_state,
     auto* table = ctx.catalog->GetTable(schema_name, table_name, *ctx.transaction);
     if (!table) throw RuntimeError("UPDATE: table not found: " + table_name);
 
-    // Scan all columns (needed for predicate evaluation and expression computation).
-    std::vector<size_t> all_col_ids;
-    all_col_ids.reserve(table->columns.size());
-    for (size_t i = 0; i < table->columns.size(); ++i) all_col_ids.push_back(i);
+    std::vector<size_t> effective_scan_col_ids = scan_col_ids;
+    if (effective_scan_col_ids.empty()) {
+        effective_scan_col_ids = update_col_ids;
+    }
+
+    std::unordered_map<size_t, size_t> table_col_to_scan_idx;
+    table_col_to_scan_idx.reserve(effective_scan_col_ids.size());
+    for (size_t i = 0; i < effective_scan_col_ids.size(); ++i) {
+        table_col_to_scan_idx[effective_scan_col_ids[i]] = i;
+    }
 
     // Per-batch old/new values must stay within STANDARD_VECTOR_SIZE.
     std::vector<TypeId> update_types;
@@ -49,7 +56,7 @@ OperatorResultType PhysicalUpdate::GetData(OperatorState& raw_state,
         while (row_offset < rg->RowCount()) {
             DataChunk batch;
             std::vector<uint32_t> batch_offsets;
-            rg->ScanBatchWithOffsets(row_offset, all_col_ids, batch, batch_offsets,
+            rg->ScanBatchWithOffsets(row_offset, effective_scan_col_ids, batch, batch_offsets,
                                      *ctx.transaction);
             if (batch.count == 0) continue;
 
@@ -65,51 +72,54 @@ OperatorResultType PhysicalUpdate::GetData(OperatorState& raw_state,
             }
             if (matching.empty()) continue;
 
+            std::vector<uint32_t> matched_offsets;
+            matched_offsets.reserve(matching.size());
+            std::vector<row_t> batch_row_ids;
+            batch_row_ids.reserve(matching.size());
+            for (uint32_t bi : matching) {
+                uint32_t local_off = batch_offsets[bi];
+                matched_offsets.push_back(local_off);
+                rg->GetVersionInfo().MarkUpdated(local_off, ctx.transaction->tx_id);
+                batch_row_ids.push_back(
+                    MakeRowId(static_cast<RowGroupId>(rg_idx), local_off));
+            }
+
             DataChunk batch_old_values;
             DataChunk batch_new_values;
             batch_old_values.Initialize(update_types);
             batch_new_values.Initialize(update_types);
-            std::vector<row_t> batch_row_ids;
-            batch_row_ids.reserve(matching.size());
-
-            // For each matching row: compute new values and write in-place.
-            for (uint32_t bi : matching) {
-                uint32_t local_off = batch_offsets[bi];
-
-                // Build a single-row chunk for this row (for expression evaluation).
-                DataChunk single_row;
-                std::vector<uint32_t> one_idx = {bi};
-                DataChunkSlice(single_row, batch, one_idx);
+            auto& chunks = rg->ColumnChunks();
+            for (size_t ui = 0; ui < update_col_ids.size(); ++ui) {
+                size_t table_col = update_col_ids[ui];
+                auto it = table_col_to_scan_idx.find(table_col);
+                if (it == table_col_to_scan_idx.end()) {
+                    throw RuntimeError("UPDATE: missing scanned value for updated column");
+                }
+                size_t scan_idx = it->second;
 
                 // Save old values for undo.
-                for (size_t ui = 0; ui < update_col_ids.size(); ++ui) {
-                    size_t table_col = update_col_ids[ui];
+                for (uint32_t bi : matching) {
                     DataVectorAppend(batch_old_values.columns[ui],
-                                     batch.columns[table_col], bi);
+                                     batch.columns[scan_idx], bi);
                 }
-                batch_old_values.count++;
 
-                // Compute new values via expressions.
-                for (size_t ui = 0; ui < update_col_ids.size(); ++ui) {
-                    size_t table_col = update_col_ids[ui];
-                    DataVector new_val_vec;
-                    new_val_vec.Reset(update_types[ui], 0);
-                    ExprEvaluator::Evaluate(*update_exprs[ui], single_row, new_val_vec);
+                // Evaluate SET expr once for the whole batch, then select matching rows.
+                DataVector full_new_vec;
+                ExprEvaluator::Evaluate(*update_exprs[ui], batch, full_new_vec);
 
-                    // Write new value into the row group.
-                    auto& chunks = rg->ColumnChunks();
-                    chunks[table_col].WriteRow(local_off, new_val_vec, 0);
-
-                    // Save new value for WAL.
-                    DataVectorAppend(batch_new_values.columns[ui], new_val_vec, 0);
+                DataVector selected_new_vec;
+                selected_new_vec.Reset(update_types[ui], 0);
+                for (uint32_t bi : matching) {
+                    DataVectorAppend(selected_new_vec, full_new_vec, bi);
                 }
-                batch_new_values.count++;
 
-                // Mark this row as updated in version info.
-                rg->GetVersionInfo().MarkUpdated(local_off, ctx.transaction->tx_id);
-                batch_row_ids.push_back(MakeRowId(static_cast<RowGroupId>(rg_idx),
-                                                  local_off));
+                // Write selected values in batch and keep redo values for WAL.
+                chunks[table_col].WriteRows(matched_offsets, selected_new_vec);
+                batch_new_values.columns[ui] = std::move(selected_new_vec);
             }
+
+            batch_old_values.count = matching.size();
+            batch_new_values.count = matching.size();
 
             if (!batch_row_ids.empty()) {
                 UpdateUndoEntry ue;

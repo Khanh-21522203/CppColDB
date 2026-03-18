@@ -124,18 +124,20 @@ DB_PATH=/tmp/cppcoldb_bench ./scripts/run_benchmark.sh
 Sample statistics:
 
 ```bash
-./build/benchmark_cppcoldb --rows 100000 --warmup 2 --iters 8
+cmake -S . -B build_release -DCMAKE_BUILD_TYPE=Release
+cmake --build build_release -j --target benchmark_cppcoldb
+./build_release/benchmark_cppcoldb --rows 100000 --warmup 2 --iters 8
 ```
 
 | Case | avg_ms | p50 | p95 | min | max | qps |
 |---|---:|---:|---:|---:|---:|---:|
-| `read.count_scan` | 65.533 | 65.253 | 66.522 | 64.922 | 66.634 | 15.260 |
-| `read.filter_count` | 42.961 | 42.611 | 43.975 | 42.473 | 44.046 | 23.277 |
-| `read.join_orderby_limit` | 566.150 | 565.349 | 570.242 | 563.261 | 570.458 | 1.766 |
-| `read.orderby_limit` | 411.457 | 411.276 | 414.335 | 408.388 | 414.449 | 2.430 |
-| `write.insert_rollback` | 3.784 | 3.783 | 3.814 | 3.759 | 3.823 | 264.258 |
-| `write.update_rollback` | 6358.477 | 6355.949 | 6402.653 | 6318.547 | 6423.370 | 0.157 |
-| `write.delete_rollback` | 71.877 | 71.873 | 73.817 | 69.879 | 73.995 | 13.913 |
+| `read.count_scan` | 3.095 | 3.076 | 3.187 | 3.054 | 3.225 | 323.095 |
+| `read.filter_count` | 1.902 | 1.865 | 2.035 | 1.850 | 2.079 | 525.817 |
+| `read.join_orderby_limit` | 23.395 | 23.394 | 23.790 | 23.005 | 23.903 | 42.745 |
+| `read.orderby_limit` | 4.663 | 4.645 | 4.995 | 4.382 | 5.101 | 214.456 |
+| `write.insert_rollback` | 0.213 | 0.213 | 0.217 | 0.211 | 0.218 | 4687.870 |
+| `write.update_rollback` | 151.701 | 151.609 | 153.161 | 149.819 | 153.267 | 6.592 |
+| `write.delete_rollback` | 4.314 | 4.175 | 5.245 | 3.808 | 5.679 | 231.784 |
 
 ## Repository Layout
 
