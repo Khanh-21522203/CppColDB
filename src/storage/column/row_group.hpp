@@ -3,6 +3,7 @@
 #include <memory>
 #include "storage/column/column_chunk.hpp"
 #include "storage/column/version_info.hpp"
+#include "storage/scan_predicate.hpp"
 
 namespace cppcoldb {
 
@@ -20,9 +21,11 @@ public:
     size_t Scan(size_t& row_offset, const std::vector<size_t>& col_ids,
                 DataChunk& chunk, const Transaction& tx);
 
-    // Zone-map: returns true if no row in this RowGroup can match the filters.
-    // Stub always returns false until Phase 7 implements LogicalExpr.
-    bool ZoneMapExcludes() const { return false; }
+    // Zone-map: returns the number of rows to skip at row_offset if any predicate
+    // column's segment stats provably exclude all rows in that segment.
+    // Returns 0 if no segment can be skipped.
+    size_t ZoneMapSkipRows(size_t row_offset,
+                           const std::vector<ScanPredicate>& predicates) const;
 
     // Like Scan, but also fills offsets_out with the row_group-relative row offset
     // for each row in the returned chunk (after MVCC visibility filter).

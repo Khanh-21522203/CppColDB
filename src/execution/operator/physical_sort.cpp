@@ -4,6 +4,7 @@
 #include "common/exception.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <numeric>
 
 namespace cppcoldb {
@@ -50,15 +51,44 @@ void PhysicalSort::Consume(const DataChunk& input,
                             ClientContext& /*ctx*/) {
     if (input.count == 0) return;
 
-    // Deep-copy the input chunk into the buffer (input may be reused by the pipeline).
+    // Deep-copy the input chunk using bulk memcpy per column (faster than
+    // per-row DataVectorAppend used by DataChunkSlice).
     DataChunk copy;
     std::vector<TypeId> types;
     types.reserve(input.ColumnCount());
     for (const auto& col : input.columns) types.push_back(col.type);
     copy.Initialize(types);
-    std::vector<uint32_t> all_rows(input.count);
-    std::iota(all_rows.begin(), all_rows.end(), 0);
-    DataChunkSlice(copy, input, all_rows);
+
+    for (size_t c = 0; c < input.ColumnCount(); ++c) {
+        const auto& src = input.columns[c];
+        auto& dst       = copy.columns[c];
+        switch (src.type) {
+            case TypeId::BOOLEAN:
+            case TypeId::INT8:
+            case TypeId::INT16:
+            case TypeId::INT32:
+            case TypeId::INT64:
+                dst.int_data.resize(src.count);
+                std::memcpy(dst.int_data.data(), src.int_data.data(),
+                            src.count * sizeof(int64_t));
+                break;
+            case TypeId::FLOAT32:
+            case TypeId::FLOAT64:
+                dst.float_data.resize(src.count);
+                std::memcpy(dst.float_data.data(), src.float_data.data(),
+                            src.count * sizeof(double));
+                break;
+            case TypeId::VARCHAR:
+                dst.str_data = src.str_data;
+                break;
+            default:
+                break;
+        }
+        dst.validity = src.validity; // bitset assignment: copies all 1024 bits at once
+        dst.count    = src.count;
+    }
+    copy.count = input.count;
+
     buf->chunks.push_back(std::move(copy));
 }
 

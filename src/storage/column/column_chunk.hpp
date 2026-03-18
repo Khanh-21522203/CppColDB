@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include "storage/column/column_segment.hpp"
+#include "storage/scan_predicate.hpp"
 #include "common/types.hpp"
 
 namespace cppcoldb {
@@ -45,6 +46,12 @@ public:
     // `row_offsets.size()` must equal `src.count`; src row i is written to row_offsets[i].
     // Offsets should be in non-decreasing order for best performance.
     void WriteRows(const std::vector<uint32_t>& row_offsets, const DataVector& src);
+
+    // Zone-map: if the segment that contains row_offset is provably excluded by
+    // (col op bound), returns the number of rows to skip (remaining rows in that
+    // segment).  Returns 0 if the segment cannot be skipped.
+    size_t ZoneMapSkipRows(size_t row_offset, ScanPredicateOp op,
+                           const Value& bound) const;
 
     TypeId              type()            const { return type_; }
     size_t              RowCount()        const;

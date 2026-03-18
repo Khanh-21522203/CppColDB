@@ -10,6 +10,46 @@ namespace cppcoldb {
 
 namespace {
 
+// Bulk-copy `count` rows from src[src_start..] into dst, appending at dst.count.
+// Uses memcpy for numeric types; falls back to element copy for VARCHAR.
+// Caller must ensure dst.validity bits are zeroed for the destination range
+// (guaranteed when dst was freshly Reset or is pending_data_ after Reset).
+static void BulkCopyRows(DataVector& dst, const DataVector& src,
+                         size_t src_start, size_t count) {
+    const size_t dst_start = dst.count;
+    switch (src.type) {
+        case TypeId::BOOLEAN:
+        case TypeId::INT8:
+        case TypeId::INT16:
+        case TypeId::INT32:
+        case TypeId::INT64:
+            dst.int_data.resize(dst_start + count, 0);
+            std::memcpy(dst.int_data.data() + dst_start,
+                        src.int_data.data() + src_start,
+                        count * sizeof(int64_t));
+            break;
+        case TypeId::FLOAT32:
+        case TypeId::FLOAT64:
+            dst.float_data.resize(dst_start + count, 0.0);
+            std::memcpy(dst.float_data.data() + dst_start,
+                        src.float_data.data() + src_start,
+                        count * sizeof(double));
+            break;
+        case TypeId::VARCHAR:
+            dst.str_data.resize(dst_start + count);
+            for (size_t j = 0; j < count; ++j)
+                dst.str_data[dst_start + j] = src.str_data[src_start + j];
+            break;
+        default:
+            break;
+    }
+    for (size_t j = 0; j < count; ++j) {
+        if (src.validity[src_start + j])
+            dst.validity.set(dst_start + j);
+    }
+    dst.count += count;
+}
+
 static SegmentStats BuildStats(TypeId type, const DataVector& vec) {
     SegmentStats stats;
     for (size_t i = 0; i < vec.count; ++i) {
@@ -53,6 +93,51 @@ size_t ColumnChunk::RowCount() const {
     return SegmentRowCount() + pending_data_.count;
 }
 
+size_t ColumnChunk::ZoneMapSkipRows(size_t row_offset,
+                                     ScanPredicateOp op,
+                                     const Value& bound) const {
+    size_t cur = 0;
+    for (const auto& seg : segments_) {
+        size_t end = cur + seg.row_count;
+        if (row_offset < end) {
+            const auto& mn = seg.stats.min_val;
+            const auto& mx = seg.stats.max_val;
+            // Skip only when stats are fully initialized and types match.
+            if (!mn.IsNull() && !mx.IsNull() && mn.type == bound.type) {
+                bool exclude = false;
+                switch (op) {
+                    case ScanPredicateOp::EQ:
+                        // col = X: skip if X < min or max < X
+                        exclude = (bound < mn) || (mx < bound);
+                        break;
+                    case ScanPredicateOp::GT:
+                        // col > X: skip if max <= X
+                        exclude = !(bound < mx);
+                        break;
+                    case ScanPredicateOp::GE:
+                        // col >= X: skip if max < X
+                        exclude = (mx < bound);
+                        break;
+                    case ScanPredicateOp::LT:
+                        // col < X: skip if min >= X
+                        exclude = !(mn < bound);
+                        break;
+                    case ScanPredicateOp::LE:
+                        // col <= X: skip if min > X
+                        exclude = (bound < mn);
+                        break;
+                }
+                if (exclude) {
+                    return end - row_offset; // skip remaining rows in this segment
+                }
+            }
+            return 0; // segment may contain matching rows
+        }
+        cur = end;
+    }
+    return 0; // row_offset is in pending_data_; no stats available
+}
+
 ColumnScanState ColumnChunk::MakeScanState(size_t row_offset) const {
     ColumnScanState state;
     size_t cur = 0;
@@ -86,9 +171,7 @@ size_t ColumnChunk::Scan(ColumnScanState& state, size_t count, DataVector& outpu
             size_t available = seg.row_count - state.row_in_segment;
             size_t to_copy   = std::min(count - rows_read, available);
 
-            for (size_t j = 0; j < to_copy; ++j) {
-                DataVectorAppend(output, seg_vec, state.row_in_segment + j);
-            }
+            BulkCopyRows(output, seg_vec, state.row_in_segment, to_copy);
 
             rows_read            += to_copy;
             state.row_in_segment += to_copy;
@@ -104,9 +187,7 @@ size_t ColumnChunk::Scan(ColumnScanState& state, size_t count, DataVector& outpu
 
             size_t to_copy = std::min(count - rows_read, available);
 
-            for (size_t j = 0; j < to_copy; ++j) {
-                DataVectorAppend(output, pending_data_, state.row_in_segment + j);
-            }
+            BulkCopyRows(output, pending_data_, state.row_in_segment, to_copy);
 
             rows_read            += to_copy;
             state.row_in_segment += to_copy;
@@ -147,11 +228,15 @@ void ColumnChunk::Flush() {
 }
 
 void ColumnChunk::AppendFromVector(const DataVector& vec, size_t count) {
-    for (size_t i = 0; i < count; ++i) {
+    size_t src_pos = 0;
+    while (src_pos < count) {
         if (pending_data_.count >= STANDARD_VECTOR_SIZE) {
             Flush();
         }
-        DataVectorAppend(pending_data_, vec, i);
+        size_t space = STANDARD_VECTOR_SIZE - pending_data_.count;
+        size_t batch = std::min(count - src_pos, space);
+        BulkCopyRows(pending_data_, vec, src_pos, batch);
+        src_pos += batch;
     }
     UpdateCombinedStats(vec, count);
 }
@@ -202,7 +287,9 @@ void ColumnChunk::WriteRow(uint32_t row_offset, const DataVector& src, size_t sr
             size_t idx = row_offset - cur;
             write_value(seg_vec, idx);
 
-            CompressionChoice choice = SelectCompression(seg_vec);
+            CompressionChoice choice = (seg.compression == CompressionType::UNCOMPRESSED)
+                ? CompressionChoice{CompressionType::UNCOMPRESSED, 0}
+                : SelectCompression(seg_vec);
             Compress(choice, seg_vec, handle.Data(), bm_.BlockSize());
             handle.MarkDirty();
             seg.compression = choice.type;
@@ -280,7 +367,9 @@ void ColumnChunk::WriteRows(const std::vector<uint32_t>& row_offsets, const Data
                 write_value(seg_vec, idx, i);
             }
 
-            CompressionChoice choice = SelectCompression(seg_vec);
+            CompressionChoice choice = (seg.compression == CompressionType::UNCOMPRESSED)
+                ? CompressionChoice{CompressionType::UNCOMPRESSED, 0}
+                : SelectCompression(seg_vec);
             Compress(choice, seg_vec, handle.Data(), bm_.BlockSize());
             handle.MarkDirty();
             seg.compression = choice.type;

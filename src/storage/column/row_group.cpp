@@ -17,6 +17,18 @@ RowGroup::RowGroup(uint32_t row_group_id, const std::vector<TypeId>& col_types,
     }
 }
 
+size_t RowGroup::ZoneMapSkipRows(size_t row_offset,
+                                  const std::vector<ScanPredicate>& predicates) const {
+    for (const auto& pred : predicates) {
+        if (pred.col_idx < column_chunks_.size()) {
+            size_t skip = column_chunks_[pred.col_idx]
+                              .ZoneMapSkipRows(row_offset, pred.op, pred.bound);
+            if (skip > 0) return skip;
+        }
+    }
+    return 0;
+}
+
 size_t RowGroup::Scan(size_t& row_offset, const std::vector<size_t>& col_ids,
                       DataChunk& chunk, const Transaction& tx) {
     if (row_offset >= row_count_) return 0;

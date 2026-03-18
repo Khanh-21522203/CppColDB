@@ -120,22 +120,33 @@ void TransactionManager::UndoBufferReverse(Transaction& tx) {
             auto* table = catalog_.GetTable(e->schema, e->table, tx);
             if (table) {
                 size_t row_count = std::min(e->row_ids.size(), e->old_values.count);
+                if (row_count == 0) return;
+
+                // All rows in one undo entry come from the same row group (one scan batch).
+                uint32_t rg_idx = RowIdGroup(e->row_ids[0]);
+                if (rg_idx >= table->row_groups.size()) return;
+                auto& rg = *table->row_groups[rg_idx];
+
+                // Collect row-group-relative offsets for a single batched WriteRows call.
+                std::vector<uint32_t> offsets;
+                offsets.reserve(row_count);
                 for (size_t ridx = 0; ridx < row_count; ++ridx) {
-                    row_t row_id = e->row_ids[ridx];
-                    uint32_t rg_idx = RowIdGroup(row_id);
-                    uint32_t offset = RowIdOffset(row_id);
-                    if (rg_idx < table->row_groups.size()) {
-                        auto& rg = table->row_groups[rg_idx];
-                        auto& chunks = rg->ColumnChunks();
-                        for (size_t ui = 0; ui < e->col_ids.size(); ++ui) {
-                            size_t col_id = e->col_ids[ui];
-                            if (ui >= e->old_values.columns.size()) break;
-                            if (col_id >= chunks.size()) continue;
-                            chunks[col_id].WriteRow(offset, e->old_values.columns[ui], ridx);
-                        }
-                        table->row_groups[rg_idx]->GetVersionInfo()
-                            .RevertUpdate(offset);
-                    }
+                    offsets.push_back(RowIdOffset(e->row_ids[ridx]));
+                }
+
+                // Restore old values per column in one batched operation (one
+                // decompress + modify-all + compress per segment, not per row).
+                auto& chunks = rg.ColumnChunks();
+                for (size_t ui = 0; ui < e->col_ids.size(); ++ui) {
+                    size_t col_id = e->col_ids[ui];
+                    if (ui >= e->old_values.columns.size()) break;
+                    if (col_id >= chunks.size()) continue;
+                    chunks[col_id].WriteRows(offsets, e->old_values.columns[ui]);
+                }
+
+                // Revert MVCC markers for all affected rows.
+                for (uint32_t off : offsets) {
+                    rg.GetVersionInfo().RevertUpdate(off);
                 }
             }
         }

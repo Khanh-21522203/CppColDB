@@ -143,18 +143,15 @@ size_t Compress(CompressionChoice choice, const DataVector& vec,
         case CompressionType::UNCOMPRESSED: {
             if (IsIntType(vec.type)) {
                 for (size_t i = 0; i < row_count; ++i) {
-                    int64_t v = vec.IsNull(i) ? 0 : vec.int_data[i];
-                    uint64_t u = static_cast<uint64_t>(v);
-                    for (int b = 0; b < 8; ++b)
-                        data_ptr[data_bytes++] = static_cast<uint8_t>((u >> (8 * b)) & 0xFF);
+                    int64_t v = vec.IsNull(i) ? int64_t{0} : vec.int_data[i];
+                    std::memcpy(data_ptr + data_bytes, &v, 8);
+                    data_bytes += 8;
                 }
             } else if (IsFloatType(vec.type)) {
                 for (size_t i = 0; i < row_count; ++i) {
                     double d = vec.IsNull(i) ? 0.0 : vec.float_data[i];
-                    uint64_t u;
-                    std::memcpy(&u, &d, 8);
-                    for (int b = 0; b < 8; ++b)
-                        data_ptr[data_bytes++] = static_cast<uint8_t>((u >> (8 * b)) & 0xFF);
+                    std::memcpy(data_ptr + data_bytes, &d, 8);
+                    data_bytes += 8;
                 }
             } else { // VARCHAR
                 for (size_t i = 0; i < row_count; ++i) {
@@ -233,19 +230,9 @@ void Decompress(const uint8_t* src_buffer, size_t buffer_size,
     switch (type) {
         case CompressionType::UNCOMPRESSED: {
             if (IsIntType(col_type)) {
-                for (size_t i = 0; i < row_count; ++i) {
-                    uint64_t u = 0;
-                    for (int b = 0; b < 8; ++b)
-                        u |= static_cast<uint64_t>(data_ptr[i * 8 + b]) << (8 * b);
-                    dst_vec.int_data[i] = static_cast<int64_t>(u);
-                }
+                std::memcpy(dst_vec.int_data.data(), data_ptr, row_count * 8);
             } else if (IsFloatType(col_type)) {
-                for (size_t i = 0; i < row_count; ++i) {
-                    uint64_t u = 0;
-                    for (int b = 0; b < 8; ++b)
-                        u |= static_cast<uint64_t>(data_ptr[i * 8 + b]) << (8 * b);
-                    std::memcpy(&dst_vec.float_data[i], &u, 8);
-                }
+                std::memcpy(dst_vec.float_data.data(), data_ptr, row_count * 8);
             } else { // VARCHAR
                 size_t pos = 0;
                 for (size_t i = 0; i < row_count; ++i) {

@@ -131,13 +131,13 @@ cmake --build build_release -j --target benchmark_cppcoldb
 
 | Case | avg_ms | p50 | p95 | min | max | qps |
 |---|---:|---:|---:|---:|---:|---:|
-| `read.count_scan` | 3.095 | 3.076 | 3.187 | 3.054 | 3.225 | 323.095 |
-| `read.filter_count` | 1.902 | 1.865 | 2.035 | 1.850 | 2.079 | 525.817 |
-| `read.join_orderby_limit` | 23.395 | 23.394 | 23.790 | 23.005 | 23.903 | 42.745 |
-| `read.orderby_limit` | 4.663 | 4.645 | 4.995 | 4.382 | 5.101 | 214.456 |
-| `write.insert_rollback` | 0.213 | 0.213 | 0.217 | 0.211 | 0.218 | 4687.870 |
-| `write.update_rollback` | 151.701 | 151.609 | 153.161 | 149.819 | 153.267 | 6.592 |
-| `write.delete_rollback` | 4.314 | 4.175 | 5.245 | 3.808 | 5.679 | 231.784 |
+| `read.count_scan` | 2.075 | 2.058 | 2.202 | 1.999 | 2.270 | 481.987 |
+| `read.filter_count` | 1.953 | 1.682 | 2.791 | 1.583 | 2.906 | 512.003 |
+| `read.join_orderby_limit` | 22.081 | 21.885 | 23.630 | 20.993 | 24.380 | 45.289 |
+| `read.orderby_limit` | 3.370 | 3.366 | 3.533 | 3.125 | 3.561 | 296.729 |
+| `write.insert_rollback` | 0.215 | 0.212 | 0.225 | 0.210 | 0.225 | 4643.843 |
+| `write.update_rollback` | 5.698 | 5.701 | 5.970 | 5.346 | 6.032 | 175.500 |
+| `write.delete_rollback` | 2.748 | 2.781 | 2.939 | 2.546 | 2.987 | 363.884 |
 
 ## Repository Layout
 
