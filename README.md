@@ -17,17 +17,26 @@ It is an embedded database engine, not a separate server process. Applications c
   - Physical planner
   - Vectorized executor with pipeline dependencies
 - Physical operators:
-  - Table scan, filter, projection, limit
+  - Table scan with zone-map segment pruning and late materialization
+  - Filter, projection, limit
   - Hash aggregation
-  - Hash join
-  - Sort (`ORDER BY`) with sink/source two-pipeline pattern
+  - Hash join with vectorized batch probe
+  - Sort (`ORDER BY`) with sink/source two-pipeline pattern and top-k heap
   - Mutation operators for `INSERT/UPDATE/DELETE` and DDL
 - Storage and durability:
   - Columnar storage (`RowGroup` + `ColumnChunk` + compressed segments)
+  - Compression codecs: uncompressed, RLE, bit-packed, delta, dictionary
   - MVCC visibility markers
   - WAL write/replay (`INSERT/DELETE/UPDATE/DDL`)
   - Checkpointing and WAL truncation
 - Query profiling infrastructure and phase/operator profiling tests
+- Performance optimizations:
+  - memcpy-based bulk column copy (eliminates per-row variant dispatch)
+  - Batched rollback (`WriteRows` per undo entry vs per-row `WriteRow`)
+  - Zone-map segment skipping (min/max stats per segment)
+  - Late materialization (filter columns scanned first; payload deferred to passing rows)
+  - Vectorized hash join probe (batch hash over typed arrays, no `Value` boxing)
+  - O(1) MVCC fast path (counter-based `AllInsertedVisibleTo` skips per-row map lookups on clean scans)
 
 ## Architecture At A Glance
 
@@ -131,13 +140,14 @@ cmake --build build_release -j --target benchmark_cppcoldb
 
 | Case | avg_ms | p50 | p95 | min | max | qps |
 |---|---:|---:|---:|---:|---:|---:|
-| `read.count_scan` | 2.075 | 2.058 | 2.202 | 1.999 | 2.270 | 481.987 |
-| `read.filter_count` | 1.953 | 1.682 | 2.791 | 1.583 | 2.906 | 512.003 |
-| `read.join_orderby_limit` | 22.081 | 21.885 | 23.630 | 20.993 | 24.380 | 45.289 |
-| `read.orderby_limit` | 3.370 | 3.366 | 3.533 | 3.125 | 3.561 | 296.729 |
-| `write.insert_rollback` | 0.215 | 0.212 | 0.225 | 0.210 | 0.225 | 4643.843 |
-| `write.update_rollback` | 5.698 | 5.701 | 5.970 | 5.346 | 6.032 | 175.500 |
-| `write.delete_rollback` | 2.748 | 2.781 | 2.939 | 2.546 | 2.987 | 363.884 |
+| `read.count_scan` | 1.780 | 1.760 | 1.887 | 1.731 | 1.917 | 561.754 |
+| `read.filter_count` | 1.212 | 1.213 | 1.221 | 1.201 | 1.229 | 825.123 |
+| `read.join_orderby_limit` | 19.576 | 19.420 | 20.284 | 19.216 | 20.412 | 51.084 |
+| `read.orderby_limit` | 3.087 | 3.037 | 3.462 | 2.868 | 3.661 | 323.969 |
+| `read.filter_project` | 1.772 | 1.710 | 1.978 | 1.645 | 2.066 | 564.435 |
+| `write.insert_rollback` | 0.224 | 0.223 | 0.236 | 0.214 | 0.250 | 4467.196 |
+| `write.update_rollback` | 5.989 | 5.910 | 6.621 | 5.564 | 6.730 | 166.983 |
+| `write.delete_rollback` | 2.694 | 2.602 | 3.224 | 2.487 | 3.307 | 371.247 |
 
 ## Repository Layout
 
@@ -162,9 +172,3 @@ cmake --build build_release -j --target benchmark_cppcoldb
 ├── flows/
 └── tasks/
 ```
-
-## Notes
-
-- This project is intended for learning and experimentation, not production use.
-- Design docs and implementation plans are in `plans/`.
-- Architecture diagrams are in `flows/`.

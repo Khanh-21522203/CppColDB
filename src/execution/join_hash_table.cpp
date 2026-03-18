@@ -1,4 +1,6 @@
 #include "execution/join_hash_table.hpp"
+#include <cstring>
+#include <functional>
 
 namespace cppcoldb {
 
@@ -52,6 +54,49 @@ JoinHashTable::Probe(const std::vector<Value>& key) const {
     auto it = table_.find(h);
     if (it == table_.end()) return EMPTY;
     return it->second;
+}
+
+const std::vector<JoinHashTable::Entry>&
+JoinHashTable::ProbeByHash(size_t hash) const {
+    auto it = table_.find(hash);
+    if (it == table_.end()) return EMPTY;
+    return it->second;
+}
+
+void JoinHashTable::ComputeHashes(const DataChunk& input,
+                                   const std::vector<size_t>& key_col_idxs,
+                                   size_t* hashes, size_t n) const {
+    std::memset(hashes, 0, n * sizeof(size_t));
+    for (size_t ki = 0; ki < key_col_idxs.size(); ++ki) {
+        const DataVector& col = input.columns[key_col_idxs[ki]];
+        switch (col.type) {
+            case TypeId::BOOLEAN:
+            case TypeId::INT8:
+            case TypeId::INT16:
+            case TypeId::INT32:
+            case TypeId::INT64:
+                for (size_t r = 0; r < n; ++r) {
+                    size_t vh = col.IsNull(r) ? 0 : std::hash<int64_t>{}(col.int_data[r]);
+                    hashes[r] ^= vh + 0x9e3779b9u + (hashes[r] << 6) + (hashes[r] >> 2);
+                }
+                break;
+            case TypeId::FLOAT32:
+            case TypeId::FLOAT64:
+                for (size_t r = 0; r < n; ++r) {
+                    size_t vh = col.IsNull(r) ? 0 : std::hash<double>{}(col.float_data[r]);
+                    hashes[r] ^= vh + 0x9e3779b9u + (hashes[r] << 6) + (hashes[r] >> 2);
+                }
+                break;
+            case TypeId::VARCHAR:
+                for (size_t r = 0; r < n; ++r) {
+                    size_t vh = col.IsNull(r) ? 0 : std::hash<std::string>{}(col.str_data[r]);
+                    hashes[r] ^= vh + 0x9e3779b9u + (hashes[r] << 6) + (hashes[r] >> 2);
+                }
+                break;
+            default:
+                break;
+        }
+    }
 }
 
 } // namespace cppcoldb

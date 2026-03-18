@@ -249,6 +249,41 @@ void ColumnChunk::TruncatePending(size_t new_count) {
     pending_data_.count = new_count;
 }
 
+void ColumnChunk::ScanRows(const std::vector<uint32_t>& offsets, DataVector& output) {
+    output.Reset(type_, 0);
+    if (offsets.empty()) return;
+
+    size_t in_i = 0;
+    size_t seg_start = 0;
+
+    for (size_t seg_idx = 0; seg_idx < segments_.size() && in_i < offsets.size(); ++seg_idx) {
+        const ColumnSegment& seg = segments_[seg_idx];
+        size_t seg_end = seg_start + seg.row_count;
+
+        // Find all offsets that fall in this segment.
+        size_t batch_begin = in_i;
+        while (in_i < offsets.size() && offsets[in_i] < seg_end) ++in_i;
+
+        if (in_i > batch_begin) {
+            BufferHandle handle = bm_.Pin(seg.block_id);
+            DataVector seg_vec;
+            Decompress(handle.Data(), bm_.BlockSize(), type_, seg_vec);
+            for (size_t j = batch_begin; j < in_i; ++j) {
+                size_t local = offsets[j] - seg_start;
+                BulkCopyRows(output, seg_vec, local, 1);
+            }
+        }
+        seg_start = seg_end;
+    }
+
+    // Remaining offsets fall in pending_data_.
+    while (in_i < offsets.size()) {
+        size_t local = static_cast<size_t>(offsets[in_i]) - seg_start;
+        BulkCopyRows(output, pending_data_, local, 1);
+        ++in_i;
+    }
+}
+
 void ColumnChunk::WriteRow(uint32_t row_offset, const DataVector& src, size_t src_idx) {
     auto write_value = [&](DataVector& target, size_t idx) {
         if (!src.IsNull(src_idx)) {

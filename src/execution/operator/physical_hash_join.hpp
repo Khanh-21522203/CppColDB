@@ -23,6 +23,8 @@ struct PhysicalHashJoinBuild : PhysicalOperator {
 struct JoinProbeState : OperatorState {
     size_t probe_row_idx = 0; // next input row to process
     size_t match_idx     = 0; // next match to emit for the current input row
+    // Reused across rows to avoid 100K per-row heap allocations.
+    std::vector<Value> probe_key;
 };
 
 // Probe side (OPERATOR): for each left-side row, probes the hash table and

@@ -219,6 +219,11 @@ int main(int argc, char** argv) {
         {"read.orderby_limit", {
             "SELECT id, val FROM bench ORDER BY val DESC LIMIT 100"
         }},
+        // Late materialization demo: 1% selectivity (grp=i%100, so grp=42 hits ~1K/100K rows).
+        // Scans grp column (filter) first; only reads val column for the ~1K matching rows.
+        {"read.filter_project", {
+            "SELECT val, grp FROM bench WHERE grp = 42"
+        }},
         {"write.insert_rollback", {
             "BEGIN",
             insert_stmt,

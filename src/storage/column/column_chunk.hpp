@@ -47,6 +47,10 @@ public:
     // Offsets should be in non-decreasing order for best performance.
     void WriteRows(const std::vector<uint32_t>& row_offsets, const DataVector& src);
 
+    // Read specific rows by their column-chunk-absolute offsets into output.
+    // offsets must be sorted ascending; each segment is decompressed at most once.
+    void ScanRows(const std::vector<uint32_t>& offsets, DataVector& output);
+
     // Zone-map: if the segment that contains row_offset is provably excluded by
     // (col op bound), returns the number of rows to skip (remaining rows in that
     // segment).  Returns 0 if the segment cannot be skipped.

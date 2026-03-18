@@ -63,18 +63,51 @@ OperatorResultType PhysicalHashJoinProbe::Execute(const DataChunk& input, DataCh
 
     output.Initialize(output_types);
     output.count = 0;
+    // Pre-size column backing to STANDARD_VECTOR_SIZE so EmitMatchRow never triggers
+    // incremental resize (avoids ~10 realloc+copy cycles per column per Execute call).
+    for (auto& col : output.columns) {
+        switch (col.type) {
+            case TypeId::BOOLEAN:
+            case TypeId::INT8: case TypeId::INT16: case TypeId::INT32: case TypeId::INT64:
+                col.int_data.resize(STANDARD_VECTOR_SIZE, 0);  break;
+            case TypeId::FLOAT32: case TypeId::FLOAT64:
+                col.float_data.resize(STANDARD_VECTOR_SIZE, 0.0); break;
+            case TypeId::VARCHAR:
+                col.str_data.resize(STANDARD_VECTOR_SIZE, ""); break;
+            default: break;
+        }
+        col.count = 0;
+    }
+
+    // Pre-size probe_key once per state lifetime.
+    if (state.probe_key.size() != left_key_col_idxs.size()) {
+        state.probe_key.assign(left_key_col_idxs.size(), Value{});
+    }
+
+    // Phase 1: Batch-compute hashes for all input rows directly from typed arrays.
+    // This replaces per-row Value boxing + HashKey() variant dispatch.
+    size_t hashes[STANDARD_VECTOR_SIZE];
+    ht->ComputeHashes(input, left_key_col_idxs, hashes, input.count);
 
     size_t row  = state.probe_row_idx;
     size_t midx = state.match_idx;
 
     while (row < input.count) {
-        // Build probe key for this left input row.
-        std::vector<Value> probe_key;
-        for (size_t kc : left_key_col_idxs) {
-            probe_key.push_back(ReadRowValue(input.columns[kc], row));
+        // Phase 2: Lookup precomputed hash — no per-row hash recomputation.
+        const auto& candidates = ht->ProbeByHash(hashes[row]);
+
+        // Skip rows with no matches entirely (no probe_key build needed).
+        if (candidates.empty()) {
+            ++row;
+            midx = 0;
+            continue;
         }
 
-        const auto& candidates = ht->Probe(probe_key);
+        // Phase 3: Equality check — build probe_key only for rows that have candidates.
+        for (size_t ki = 0; ki < left_key_col_idxs.size(); ++ki) {
+            state.probe_key[ki] = ReadRowValue(input.columns[left_key_col_idxs[ki]], row);
+        }
+        const auto& probe_key = state.probe_key;
         while (midx < candidates.size()) {
             // Verify full key equality (guard against hash collisions).
             bool eq = true;

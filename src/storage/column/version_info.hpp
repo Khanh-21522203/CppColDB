@@ -43,8 +43,20 @@ public:
     bool HasAnyMarkers() const { return !markers_.empty(); }
     bool HasUncommittedMarkers() const;
 
+    // O(1) fast path: returns true when every marker is a committed INSERT
+    // with commit_time < tx_start — meaning every row is visible and the
+    // per-row IsVisible loop in RowGroup::Scan can be skipped entirely.
+    bool AllInsertedVisibleTo(timestamp_t tx_start) const {
+        return uncommitted_count_ == 0
+            && delete_update_count_ == 0
+            && max_insert_commit_time_ < tx_start;
+    }
+
 private:
     std::unordered_map<uint32_t, VersionMarker> markers_;
+    int         uncommitted_count_       = 0; // markers with INVALID_TIMESTAMP
+    int         delete_update_count_     = 0; // DELETE + UPDATE markers
+    timestamp_t max_insert_commit_time_  = 0; // max commit_time of any INSERT marker
 };
 
 } // namespace cppcoldb

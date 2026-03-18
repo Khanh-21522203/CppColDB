@@ -22,6 +22,15 @@ public:
     // Returns all entries matching key (empty vector if none).
     const std::vector<Entry>& Probe(const std::vector<Value>& key) const;
 
+    // Batch-compute hashes for row_count rows directly from typed arrays (no Value boxing).
+    // hashes_out must be a caller-provided array of at least row_count elements.
+    void ComputeHashes(const DataChunk& input,
+                       const std::vector<size_t>& key_col_idxs,
+                       size_t* hashes_out, size_t row_count) const;
+
+    // Probe by precomputed hash (use after ComputeHashes).
+    const std::vector<Entry>& ProbeByHash(size_t hash) const;
+
 private:
     std::unordered_map<size_t, std::vector<Entry>> table_;
     static const std::vector<Entry>                EMPTY;

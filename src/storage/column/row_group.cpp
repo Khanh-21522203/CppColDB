@@ -50,7 +50,10 @@ size_t RowGroup::Scan(size_t& row_offset, const std::vector<size_t>& col_ids,
     chunk.count = rows_to_read;
 
     // Apply MVCC visibility filter.
-    if (version_info_->HasAnyMarkers()) {
+    // Fast path: if all markers are committed INSERTs visible to this transaction,
+    // every row is visible — skip the per-row unordered_map lookup loop entirely.
+    if (version_info_->HasAnyMarkers() &&
+        !version_info_->AllInsertedVisibleTo(tx.start_time)) {
         std::vector<uint32_t> selection;
         selection.reserve(rows_to_read);
         for (size_t i = 0; i < rows_to_read; ++i) {
@@ -111,6 +114,20 @@ size_t RowGroup::ScanBatchWithOffsets(size_t& row_offset,
 
     row_offset += rows_to_read;
     return chunk.count;
+}
+
+void RowGroup::ScanLate(const std::vector<uint32_t>& row_offsets,
+                        const std::vector<size_t>& late_col_ids,
+                        DataChunk& output) {
+    std::vector<TypeId> types;
+    types.reserve(late_col_ids.size());
+    for (size_t c : late_col_ids) types.push_back(col_types_[c]);
+    output.Initialize(types);
+
+    for (size_t ci = 0; ci < late_col_ids.size(); ++ci) {
+        column_chunks_[late_col_ids[ci]].ScanRows(row_offsets, output.columns[ci]);
+    }
+    output.count = row_offsets.size();
 }
 
 void RowGroup::Append(const DataChunk& chunk, const std::vector<size_t>& col_ids,

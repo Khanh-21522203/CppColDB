@@ -5,47 +5,62 @@ namespace cppcoldb {
 
 void VersionInfo::MarkDeleted(uint32_t row_offset, TransactionId tx_id) {
     markers_[row_offset] = {VersionMarkerType::DELETE, tx_id, INVALID_TIMESTAMP};
+    ++uncommitted_count_;
+    ++delete_update_count_;
 }
 
 void VersionInfo::CommitDelete(uint32_t row_offset, timestamp_t commit_time) {
     auto it = markers_.find(row_offset);
     if (it != markers_.end()) {
         it->second.commit_time = commit_time;
+        --uncommitted_count_;
     }
 }
 
 void VersionInfo::ClearDeleteMarker(uint32_t row_offset) {
-    markers_.erase(row_offset);
+    if (markers_.erase(row_offset))
+        --delete_update_count_;
 }
 
 void VersionInfo::MarkInserted(uint32_t row_offset, TransactionId tx_id) {
     markers_[row_offset] = {VersionMarkerType::INSERT, tx_id, INVALID_TIMESTAMP};
+    ++uncommitted_count_;
 }
 
 void VersionInfo::CommitInsert(uint32_t row_offset, timestamp_t commit_time) {
     auto it = markers_.find(row_offset);
     if (it != markers_.end()) {
         it->second.commit_time = commit_time;
+        --uncommitted_count_;
+        if (commit_time > max_insert_commit_time_)
+            max_insert_commit_time_ = commit_time;
     }
 }
 
 void VersionInfo::RevertInsert(uint32_t row_offset) {
-    markers_.erase(row_offset);
+    if (markers_.erase(row_offset))
+        --uncommitted_count_;
 }
 
 void VersionInfo::MarkUpdated(uint32_t row_offset, TransactionId tx_id) {
     markers_[row_offset] = {VersionMarkerType::UPDATE, tx_id, INVALID_TIMESTAMP};
+    ++uncommitted_count_;
+    ++delete_update_count_;
 }
 
 void VersionInfo::CommitUpdate(uint32_t row_offset, timestamp_t commit_time) {
     auto it = markers_.find(row_offset);
     if (it != markers_.end()) {
         it->second.commit_time = commit_time;
+        --uncommitted_count_;
     }
 }
 
 void VersionInfo::RevertUpdate(uint32_t row_offset) {
-    markers_.erase(row_offset);
+    if (markers_.erase(row_offset)) {
+        --uncommitted_count_;
+        --delete_update_count_;
+    }
 }
 
 bool VersionInfo::IsVisible(uint32_t row_offset, const Transaction& tx) const {

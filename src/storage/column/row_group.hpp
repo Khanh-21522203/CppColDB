@@ -33,6 +33,13 @@ public:
                                  DataChunk& chunk, std::vector<uint32_t>& offsets_out,
                                  const Transaction& tx);
 
+    // Read specific columns for the given row offsets (absolute within this row group).
+    // row_offsets must be sorted ascending; MVCC was already applied by the early scan.
+    // output is initialized here with late_col_ids.size() columns.
+    void ScanLate(const std::vector<uint32_t>& row_offsets,
+                  const std::vector<size_t>& late_col_ids,
+                  DataChunk& output);
+
     // Append rows from chunk (for the given column indices).
     // If tx_id != INVALID_TRANSACTION, marks rows as uncommitted INSERTs.
     void Append(const DataChunk& chunk, const std::vector<size_t>& col_ids,
