@@ -89,7 +89,8 @@ TableCatalogEntry* Catalog::GetTable(const std::string& schema,
 
 void Catalog::CreateTable(const std::string& schema, const std::string& name,
                            const std::vector<ColumnDefinition>& cols,
-                           const Transaction& tx) {
+                           const Transaction& tx,
+                           const PartitionInfo& partition_info) {
     std::lock_guard<std::mutex> lk(mu_);
     auto* s = GetSchema(schema);
     if (!s) throw BindError("Schema not found: " + schema);
@@ -107,6 +108,10 @@ void Catalog::CreateTable(const std::string& schema, const std::string& name,
     entry->create_tx_id     = tx.tx_id;
     entry->create_commit_time = INVALID_TIMESTAMP;
     entry->bm_              = &bm_;
+    entry->partition_info   = partition_info;
+    if (partition_info.IsPartitioned()) {
+        entry->partition_rg_indices.resize(partition_info.num_partitions);
+    }
     s->CreateEntry(std::move(entry));
 }
 
@@ -222,7 +227,63 @@ void Catalog::Serialize(uint8_t* block, size_t /*block_size*/) const {
                 CkptWriteU8(p, col.not_null ? 1u : 0u);
             }
 
-            // Row groups.
+            // Partition info.
+            const auto& pi = tbl->partition_info;
+            CkptWriteU8(p, (uint8_t)pi.type);
+            if (pi.IsPartitioned()) {
+                CkptWriteStr(p, pi.partition_col);
+                CkptWriteU32(p, pi.num_partitions);
+                if (pi.type == PartitionType::RANGE) {
+                    // Write N upper bounds (last is null → written as empty string with flag).
+                    CkptWriteU32(p, (uint32_t)pi.defs.size());
+                    for (const auto& def : pi.defs) {
+                        CkptWriteU8(p, def.upper_bound.IsNull() ? 1u : 0u);
+                        if (!def.upper_bound.IsNull()) {
+                            CkptWriteU8(p, (uint8_t)def.upper_bound.type);
+                            if (def.upper_bound.type == TypeId::VARCHAR) {
+                                CkptWriteStr(p, def.upper_bound.GetVarchar());
+                            } else if (def.upper_bound.type == TypeId::FLOAT32 ||
+                                       def.upper_bound.type == TypeId::FLOAT64) {
+                                uint64_t bits;
+                                double v = def.upper_bound.GetFloat64();
+                                std::memcpy(&bits, &v, 8);
+                                CkptWriteU64(p, bits);
+                            } else {
+                                CkptWriteU64(p, (uint64_t)def.upper_bound.GetInt64());
+                            }
+                        }
+                    }
+                } else if (pi.type == PartitionType::LIST) {
+                    CkptWriteU32(p, (uint32_t)pi.defs.size());
+                    for (const auto& def : pi.defs) {
+                        CkptWriteU32(p, (uint32_t)def.list_values.size());
+                        for (const auto& v : def.list_values) {
+                            CkptWriteU8(p, (uint8_t)v.type);
+                            if (v.type == TypeId::VARCHAR) {
+                                CkptWriteStr(p, v.GetVarchar());
+                            } else if (v.type == TypeId::FLOAT32 ||
+                                       v.type == TypeId::FLOAT64) {
+                                uint64_t bits;
+                                double dv = v.GetFloat64();
+                                std::memcpy(&bits, &dv, 8);
+                                CkptWriteU64(p, bits);
+                            } else {
+                                CkptWriteU64(p, (uint64_t)v.GetInt64());
+                            }
+                        }
+                    }
+                }
+                // HASH: num_partitions is enough, no defs.
+
+                // partition_rg_indices[pid] = list of row_group indices.
+                for (uint32_t pid = 0; pid < pi.num_partitions; ++pid) {
+                    const auto& idxs = tbl->partition_rg_indices[pid];
+                    CkptWriteU32(p, (uint32_t)idxs.size());
+                    for (size_t idx : idxs) CkptWriteU32(p, (uint32_t)idx);
+                }
+            }
+
+            // Row groups (flat list, all partitions).
             CkptWriteU32(p, (uint32_t)tbl->row_groups.size());
             for (const auto& rg : tbl->row_groups) {
                 CkptWriteU64(p, (uint64_t)rg->RowCount());
@@ -282,6 +343,71 @@ void Catalog::Deserialize(const uint8_t* block, size_t /*block_size*/) {
                 cols.push_back(std::move(col));
             }
 
+            // Read partition info.
+            PartitionInfo pi;
+            pi.type = (PartitionType)CkptReadU8(p);
+            std::vector<std::vector<size_t>> partition_rg_indices_loaded;
+            if (pi.IsPartitioned()) {
+                pi.partition_col = CkptReadStr(p);
+                pi.num_partitions = CkptReadU32(p);
+                if (pi.type == PartitionType::RANGE) {
+                    uint32_t def_count = CkptReadU32(p);
+                    pi.defs.resize(def_count);
+                    for (uint32_t di = 0; di < def_count; di++) {
+                        bool is_null = CkptReadU8(p) != 0;
+                        if (!is_null) {
+                            TypeId vtype = (TypeId)CkptReadU8(p);
+                            if (vtype == TypeId::VARCHAR) {
+                                pi.defs[di].upper_bound = Value::Varchar(CkptReadStr(p));
+                            } else if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
+                                uint64_t bits = CkptReadU64(p);
+                                double v; std::memcpy(&v, &bits, 8);
+                                pi.defs[di].upper_bound = Value::Float(v);
+                                pi.defs[di].upper_bound.type = vtype;
+                            } else {
+                                int64_t v = (int64_t)CkptReadU64(p);
+                                pi.defs[di].upper_bound = Value::Integer(v);
+                                pi.defs[di].upper_bound.type = vtype;
+                            }
+                        }
+                        // is_null → upper_bound stays default (IsNull() == true)
+                    }
+                } else if (pi.type == PartitionType::LIST) {
+                    uint32_t def_count = CkptReadU32(p);
+                    pi.defs.resize(def_count);
+                    for (uint32_t di = 0; di < def_count; di++) {
+                        uint32_t val_count = CkptReadU32(p);
+                        pi.defs[di].list_values.reserve(val_count);
+                        for (uint32_t vi = 0; vi < val_count; vi++) {
+                            TypeId vtype = (TypeId)CkptReadU8(p);
+                            Value v;
+                            if (vtype == TypeId::VARCHAR) {
+                                v = Value::Varchar(CkptReadStr(p));
+                            } else if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
+                                uint64_t bits = CkptReadU64(p);
+                                double dv; std::memcpy(&dv, &bits, 8);
+                                v = Value::Float(dv);
+                                v.type = vtype;
+                            } else {
+                                int64_t iv = (int64_t)CkptReadU64(p);
+                                v = Value::Integer(iv);
+                                v.type = vtype;
+                            }
+                            pi.defs[di].list_values.push_back(std::move(v));
+                        }
+                    }
+                }
+                // Read partition_rg_indices.
+                partition_rg_indices_loaded.resize(pi.num_partitions);
+                for (uint32_t pid = 0; pid < pi.num_partitions; pid++) {
+                    uint32_t idx_count = CkptReadU32(p);
+                    partition_rg_indices_loaded[pid].reserve(idx_count);
+                    for (uint32_t ii = 0; ii < idx_count; ii++) {
+                        partition_rg_indices_loaded[pid].push_back((size_t)CkptReadU32(p));
+                    }
+                }
+            }
+
             // Read row group metadata before creating table.
             struct RGMeta {
                 uint64_t row_count;
@@ -318,7 +444,7 @@ void Catalog::Deserialize(const uint8_t* block, size_t /*block_size*/) {
             }
 
             // Create empty table in catalog.
-            CreateTable(sname, tname, cols, sys_tx);
+            CreateTable(sname, tname, cols, sys_tx, pi);
             // commit_time = 0 so IsCatalogEntryVisible (create_commit_time < tx.start_time)
             // holds for every transaction whose start_time >= 1 (the minimum).
             CommitEntry(sname, tname, INVALID_TRANSACTION, 0);
@@ -340,6 +466,13 @@ void Catalog::Deserialize(const uint8_t* block, size_t /*block_size*/) {
                 if (tbl_entry) break;
             }
             if (!tbl_entry) continue;
+
+            // Restore partition column index.
+            if (tbl_entry->partition_info.IsPartitioned()) {
+                int idx = tbl_entry->FindColumn(tbl_entry->partition_info.partition_col);
+                tbl_entry->partition_info.partition_col_idx = idx;
+                tbl_entry->partition_rg_indices = std::move(partition_rg_indices_loaded);
+            }
 
             // Collect column TypeIds for RowGroup construction.
             std::vector<TypeId> col_types;

@@ -312,12 +312,13 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanCreateTable(
     const LogicalCreateTable& node) {
 
     auto op = std::make_unique<PhysicalCreateTable>();
-    op->schema_name   = node.schema_name;
-    op->table_name    = node.table_name;
-    op->columns       = node.columns;
-    op->if_not_exists = node.if_not_exists;
-    op->output_types  = {};
-    op->output_names  = {};
+    op->schema_name    = node.schema_name;
+    op->table_name     = node.table_name;
+    op->columns        = node.columns;
+    op->if_not_exists  = node.if_not_exists;
+    op->partition_info = node.partition_info;
+    op->output_types   = {};
+    op->output_names   = {};
     return op;
 }
 

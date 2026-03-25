@@ -329,6 +329,57 @@ std::unique_ptr<CreateTableStatement> Parser::ParseCreateTable() {
         stmt->columns.push_back(ParseColDef());
 
     Expect(TokenType::PUNCTUATION, ")");
+
+    // Optional: PARTITION BY RANGE(col) VALUES (b1, b2, ...)
+    //           PARTITION BY HASH(col) PARTITIONS N
+    //           PARTITION BY LIST(col) PARTITION p0 VALUES IN (v,...), ...
+    if (Match(TokenType::KEYWORD, "PARTITION")) {
+        Expect(TokenType::KEYWORD, "BY");
+
+        if (Match(TokenType::KEYWORD, "RANGE")) {
+            stmt->partition_kind = CreateTableStatement::PartitionKind::RANGE;
+            Expect(TokenType::PUNCTUATION, "(");
+            stmt->partition_col = Expect(TokenType::IDENTIFIER).value;
+            Expect(TokenType::PUNCTUATION, ")");
+            // VALUES (b1, b2, ...)
+            Expect(TokenType::KEYWORD, "VALUES");
+            Expect(TokenType::PUNCTUATION, "(");
+            stmt->range_bounds.push_back(ParseExpr());
+            while (Match(TokenType::PUNCTUATION, ","))
+                stmt->range_bounds.push_back(ParseExpr());
+            Expect(TokenType::PUNCTUATION, ")");
+
+        } else if (Match(TokenType::KEYWORD, "HASH")) {
+            stmt->partition_kind = CreateTableStatement::PartitionKind::HASH;
+            Expect(TokenType::PUNCTUATION, "(");
+            stmt->partition_col = Expect(TokenType::IDENTIFIER).value;
+            Expect(TokenType::PUNCTUATION, ")");
+            Expect(TokenType::KEYWORD, "PARTITIONS");
+            Token cnt = Expect(TokenType::INTEGER_LIT);
+            stmt->hash_partition_count = static_cast<uint32_t>(std::stoll(cnt.value));
+
+        } else if (Match(TokenType::KEYWORD, "LIST")) {
+            stmt->partition_kind = CreateTableStatement::PartitionKind::LIST;
+            Expect(TokenType::PUNCTUATION, "(");
+            stmt->partition_col = Expect(TokenType::IDENTIFIER).value;
+            Expect(TokenType::PUNCTUATION, ")");
+            // PARTITION name VALUES IN (v1, v2, ...) [, PARTITION ...]
+            do {
+                Expect(TokenType::KEYWORD, "PARTITION");
+                Expect(TokenType::IDENTIFIER); // partition name (ignored)
+                Expect(TokenType::KEYWORD, "VALUES");
+                Expect(TokenType::KEYWORD, "IN");
+                Expect(TokenType::PUNCTUATION, "(");
+                std::vector<std::unique_ptr<Expr>> vals;
+                vals.push_back(ParseExpr());
+                while (Match(TokenType::PUNCTUATION, ","))
+                    vals.push_back(ParseExpr());
+                Expect(TokenType::PUNCTUATION, ")");
+                stmt->list_values.push_back(std::move(vals));
+            } while (Match(TokenType::PUNCTUATION, ","));
+        }
+    }
+
     return stmt;
 }
 

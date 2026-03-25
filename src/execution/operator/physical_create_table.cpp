@@ -27,12 +27,14 @@ OperatorResultType PhysicalCreateTable::GetData(OperatorState& raw_state,
 
     bool created = false;
     if (!if_not_exists) {
-        ctx.catalog->CreateTable(schema_name, table_name, columns, *ctx.transaction);
+        ctx.catalog->CreateTable(schema_name, table_name, columns, *ctx.transaction,
+                                 partition_info);
         created = true;
     } else {
         // if_not_exists: only create if not already there
         try {
-            ctx.catalog->CreateTable(schema_name, table_name, columns, *ctx.transaction);
+            ctx.catalog->CreateTable(schema_name, table_name, columns, *ctx.transaction,
+                                     partition_info);
             created = true;
         } catch (const CppColDBException&) {
             // table already exists — silently ignore
@@ -43,9 +45,10 @@ OperatorResultType PhysicalCreateTable::GetData(OperatorState& raw_state,
     // which sets create_commit_time and makes the table visible to future transactions.
     if (created) {
         CatalogUndoEntry ue;
-        ue.schema     = schema_name;
-        ue.table      = table_name;
-        ue.was_create = true;
+        ue.schema          = schema_name;
+        ue.table           = table_name;
+        ue.was_create      = true;
+        ue.partition_info  = partition_info;
         ue.col_names.reserve(columns.size());
         ue.col_types.reserve(columns.size());
         for (const auto& col : columns) {

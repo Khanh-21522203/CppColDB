@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include "catalog/schema.hpp"
+#include "storage/partition_info.hpp"
 
 namespace cppcoldb {
 
@@ -30,7 +31,8 @@ public:
     // DDL operations
     void CreateTable(const std::string& schema, const std::string& name,
                      const std::vector<ColumnDefinition>& cols,
-                     const Transaction& tx);
+                     const Transaction& tx,
+                     const PartitionInfo& partition_info = PartitionInfo{});
     void DropTable(const std::string& schema, const std::string& name,
                    const Transaction& tx);
 

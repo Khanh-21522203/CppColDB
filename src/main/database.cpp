@@ -17,6 +17,7 @@
 #include <cstring>
 #include <algorithm>
 #include <numeric>
+#include <unordered_map>
 
 namespace cppcoldb {
 
@@ -199,9 +200,62 @@ void Database::ReplayWAL() {
                     def.type = static_cast<TypeId>(RdU8(p));
                     cols.push_back(std::move(def));
                 }
+                // Partition info (appended after columns).
+                PartitionInfo pi;
+                pi.type = (PartitionType)RdU8(p);
+                if (pi.IsPartitioned()) {
+                    pi.partition_col  = RdStr(p);
+                    pi.num_partitions = RdU32(p);
+                    // Resolve partition_col_idx from cols.
+                    for (int ci = 0; ci < (int)cols.size(); ++ci) {
+                        if (cols[ci].name == pi.partition_col) {
+                            pi.partition_col_idx = ci; break;
+                        }
+                    }
+                    if (pi.type == PartitionType::RANGE) {
+                        uint32_t def_count = RdU32(p);
+                        pi.defs.resize(def_count);
+                        for (uint32_t di = 0; di < def_count; ++di) {
+                            bool is_null = RdU8(p) != 0;
+                            if (!is_null) {
+                                TypeId vtype = (TypeId)RdU8(p);
+                                if (vtype == TypeId::VARCHAR) {
+                                    pi.defs[di].upper_bound = Value::Varchar(RdStr(p));
+                                } else if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
+                                    pi.defs[di].upper_bound = Value::Float(RdF64(p));
+                                    pi.defs[di].upper_bound.type = vtype;
+                                } else {
+                                    pi.defs[di].upper_bound = Value::Integer(RdI64(p));
+                                    pi.defs[di].upper_bound.type = vtype;
+                                }
+                            }
+                        }
+                    } else if (pi.type == PartitionType::LIST) {
+                        uint32_t def_count = RdU32(p);
+                        pi.defs.resize(def_count);
+                        for (uint32_t di = 0; di < def_count; ++di) {
+                            uint32_t val_count = RdU32(p);
+                            pi.defs[di].list_values.reserve(val_count);
+                            for (uint32_t vi = 0; vi < val_count; ++vi) {
+                                TypeId vtype = (TypeId)RdU8(p);
+                                Value v;
+                                if (vtype == TypeId::VARCHAR) {
+                                    v = Value::Varchar(RdStr(p));
+                                } else if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
+                                    v = Value::Float(RdF64(p));
+                                    v.type = vtype;
+                                } else {
+                                    v = Value::Integer(RdI64(p));
+                                    v.type = vtype;
+                                }
+                                pi.defs[di].list_values.push_back(std::move(v));
+                            }
+                        }
+                    }
+                }
                 auto tx = txn_manager_->BeginTransaction(true);
                 try {
-                    catalog_->CreateTable(schema_name, table_name, cols, *tx);
+                    catalog_->CreateTable(schema_name, table_name, cols, *tx, pi);
                     txn_manager_->Commit(tx);
                 } catch (...) {
                     txn_manager_->Rollback(tx);
@@ -234,19 +288,60 @@ void Database::ReplayWAL() {
                         std::vector<size_t> col_ids(table->columns.size());
                         std::iota(col_ids.begin(), col_ids.end(), 0);
 
-                        RowGroup* rg = table->GetOrAddRowGroup();
-                        size_t rg_id = table->row_groups.size() - 1;
-                        size_t append_start = rg->RowCount();
-                        rg->Append(chunk, col_ids, tx->tx_id);
+                        const auto& pi = table->partition_info;
+                        if (!pi.IsPartitioned()) {
+                            RowGroup* rg        = table->GetOrAddRowGroup();
+                            size_t    rg_id     = table->row_groups.size() - 1;
+                            size_t    app_start = rg->RowCount();
+                            rg->Append(chunk, col_ids, tx->tx_id);
 
-                        InsertUndoEntry ue;
-                        ue.schema = schema_name;
-                        ue.table = table_name;
-                        ue.row_group_id = rg_id;
-                        ue.append_start = append_start;
-                        ue.append_count = chunk.count;
-                        ue.inserted_rows = chunk;
-                        tx->undo_buffer.PushInsert(std::move(ue));
+                            InsertUndoEntry ue;
+                            ue.schema        = schema_name;
+                            ue.table         = table_name;
+                            ue.row_group_id  = rg_id;
+                            ue.append_start  = app_start;
+                            ue.append_count  = chunk.count;
+                            ue.inserted_rows = chunk;
+                            tx->undo_buffer.PushInsert(std::move(ue));
+                        } else {
+                            // Route rows by partition (same as physical_insert path).
+                            int pk_chunk_idx = pi.partition_col_idx; // in chunk = table col idx
+                            std::unordered_map<uint32_t, std::vector<uint32_t>> by_part;
+                            for (uint32_t r = 0; r < (uint32_t)chunk.count; ++r) {
+                                const auto& pk_vec = chunk.columns[pk_chunk_idx];
+                                Value key;
+                                if (!pk_vec.IsNull(r)) {
+                                    TypeId t = pk_vec.type;
+                                    if (t == TypeId::FLOAT32 || t == TypeId::FLOAT64) {
+                                        key = Value::Float(pk_vec.float_data[r]);
+                                        key.type = t;
+                                    } else if (t == TypeId::VARCHAR) {
+                                        key = Value::Varchar(pk_vec.str_data[r]);
+                                    } else {
+                                        key = Value::Integer(pk_vec.int_data[r]);
+                                        key.type = t;
+                                    }
+                                }
+                                by_part[pi.RouteRow(key)].push_back(r);
+                            }
+                            for (auto& [pid, idxs] : by_part) {
+                                DataChunk slice;
+                                DataChunkSlice(slice, chunk, idxs);
+                                RowGroup* rg        = table->GetOrAddRowGroupForPartition(pid);
+                                size_t    rg_id     = table->partition_rg_indices[pid].back();
+                                size_t    app_start = rg->RowCount();
+                                rg->Append(slice, col_ids, tx->tx_id);
+
+                                InsertUndoEntry ue;
+                                ue.schema        = schema_name;
+                                ue.table         = table_name;
+                                ue.row_group_id  = rg_id;
+                                ue.append_start  = app_start;
+                                ue.append_count  = slice.count;
+                                ue.inserted_rows = slice;
+                                tx->undo_buffer.PushInsert(std::move(ue));
+                            }
+                        }
                     }
                     txn_manager_->Commit(tx);
                 } catch (...) {

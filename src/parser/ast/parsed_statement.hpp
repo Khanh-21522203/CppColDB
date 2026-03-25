@@ -169,6 +169,19 @@ struct CreateTableStatement : ParsedStatement {
     std::string            table_name;
     std::vector<ColumnDef> columns;
     bool                   if_not_exists = false;
+
+    // Partition specification (optional).
+    enum class PartitionKind { NONE, RANGE, HASH, LIST };
+    PartitionKind            partition_kind = PartitionKind::NONE;
+    std::string              partition_col;
+    uint32_t                 hash_partition_count = 0; // HASH only
+
+    // RANGE: ordered split-point literals (N-1 bounds → N partitions).
+    // E.g. {100, 200, 300} → 4 partitions: <100, [100,200), [200,300), >=300
+    std::vector<std::unique_ptr<Expr>> range_bounds;
+
+    // LIST: list_values[i] = value literals for partition i.
+    std::vector<std::vector<std::unique_ptr<Expr>>> list_values;
 };
 
 struct DropTableStatement : ParsedStatement {

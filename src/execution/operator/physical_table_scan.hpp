@@ -9,6 +9,8 @@ namespace cppcoldb {
 struct TableScanState : OperatorState {
     size_t row_group_idx       = 0;
     size_t row_offset_in_group = 0;
+    // For partitioned tables: index into active_partition_ids_.
+    size_t partition_idx       = 0;
 };
 
 struct PhysicalTableScan : PhysicalOperator {
@@ -28,6 +30,8 @@ struct PhysicalTableScan : PhysicalOperator {
     std::vector<size_t> payload_table_col_ids_;  // table-level col indices for payload cols
     // pushed_filters cloned and remapped to early_chunk column positions (0..filter_col_ids_.size()-1)
     std::vector<std::unique_ptr<LogicalExpr>> early_filters_;
+    // Partition pruning: populated by InitScan for partitioned tables.
+    std::vector<uint32_t> active_partition_ids_;
 
     PhysicalTableScan() { role = OperatorRole::SOURCE; }
 

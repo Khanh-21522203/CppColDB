@@ -555,11 +555,88 @@ std::unique_ptr<LogicalPlan> Binder::BindCreateTable(const CreateTableStatement&
         col_defs.push_back(std::move(cd));
     }
 
+    // Build PartitionInfo if a partition clause was specified.
+    PartitionInfo pi;
+    if (stmt.partition_kind != CreateTableStatement::PartitionKind::NONE) {
+        // Resolve partition column.
+        int pk_idx = -1;
+        for (int i = 0; i < static_cast<int>(col_defs.size()); ++i) {
+            if (col_defs[i].name == stmt.partition_col) { pk_idx = i; break; }
+        }
+        if (pk_idx < 0)
+            throw BindError("partition column not found: " + stmt.partition_col);
+
+        pi.partition_col     = stmt.partition_col;
+        pi.partition_col_idx = pk_idx;
+        TypeId pk_type       = col_defs[pk_idx].type;
+
+        // Helper: convert a parsed literal Expr to a Value.
+        auto ExprToValue = [&](const Expr& e) -> Value {
+            if (e.kind == Expr::Kind::INTEGER_LIT) {
+                int64_t v = static_cast<const IntegerLitExpr&>(e).value;
+                Value val = Value::Integer(v);
+                val.type  = pk_type;
+                return val;
+            }
+            if (e.kind == Expr::Kind::FLOAT_LIT) {
+                double v  = static_cast<const FloatLitExpr&>(e).value;
+                Value val = Value::Float(v);
+                val.type  = pk_type;
+                return val;
+            }
+            if (e.kind == Expr::Kind::STRING_LIT) {
+                return Value::Varchar(static_cast<const StringLitExpr&>(e).value);
+            }
+            throw BindError("partition bound must be a literal constant");
+        };
+
+        if (stmt.partition_kind == CreateTableStatement::PartitionKind::RANGE) {
+            if (stmt.range_bounds.empty())
+                throw BindError("RANGE partitioning requires at least one bound");
+            // N-1 bounds → N partitions.
+            // defs[0].upper_bound = bounds[0]; defs[N-1].upper_bound = null (catch-all).
+            uint32_t n = static_cast<uint32_t>(stmt.range_bounds.size()) + 1;
+            pi.type           = PartitionType::RANGE;
+            pi.num_partitions = n;
+            pi.defs.resize(n);
+            for (uint32_t i = 0; i < n - 1; ++i) {
+                pi.defs[i].upper_bound = ExprToValue(*stmt.range_bounds[i]);
+            }
+            // Validate bounds are strictly increasing.
+            for (uint32_t i = 1; i < n - 1; ++i) {
+                if (!(pi.defs[i - 1].upper_bound < pi.defs[i].upper_bound))
+                    throw BindError("RANGE partition bounds must be strictly increasing");
+            }
+            // Last partition has open upper bound (IsNull = true by default).
+
+        } else if (stmt.partition_kind == CreateTableStatement::PartitionKind::HASH) {
+            if (stmt.hash_partition_count < 1)
+                throw BindError("HASH partitioning requires PARTITIONS >= 1");
+            pi.type           = PartitionType::HASH;
+            pi.num_partitions = stmt.hash_partition_count;
+            // defs is empty for HASH.
+
+        } else if (stmt.partition_kind == CreateTableStatement::PartitionKind::LIST) {
+            if (stmt.list_values.empty())
+                throw BindError("LIST partitioning requires at least one partition");
+            uint32_t n        = static_cast<uint32_t>(stmt.list_values.size());
+            pi.type           = PartitionType::LIST;
+            pi.num_partitions = n;
+            pi.defs.resize(n);
+            for (uint32_t i = 0; i < n; ++i) {
+                for (const auto& ve : stmt.list_values[i]) {
+                    pi.defs[i].list_values.push_back(ExprToValue(*ve));
+                }
+            }
+        }
+    }
+
     auto node = std::make_unique<LogicalCreateTable>();
     node->schema_name   = schema_name;
     node->table_name    = stmt.table_name;
     node->columns       = std::move(col_defs);
     node->if_not_exists = stmt.if_not_exists;
+    node->partition_info = std::move(pi);
     return node;
 }
 

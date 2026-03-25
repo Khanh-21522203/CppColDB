@@ -3,6 +3,7 @@
 #include <variant>
 #include <functional>
 #include "common/types.hpp"
+#include "storage/partition_info.hpp"
 
 namespace cppcoldb {
 
@@ -13,6 +14,7 @@ struct CatalogUndoEntry {
     // Filled for CREATE TABLE so WAL logging at commit can serialize schema.
     std::vector<std::string> col_names;
     std::vector<TypeId>      col_types;
+    PartitionInfo            partition_info;
 };
 
 struct InsertUndoEntry {

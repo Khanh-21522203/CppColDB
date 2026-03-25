@@ -184,6 +184,7 @@ struct LogicalCreateTable : LogicalPlan {
     std::string                   table_name;
     std::vector<ColumnDefinition> columns;
     bool                          if_not_exists = false;
+    PartitionInfo                 partition_info;
 };
 
 struct LogicalDropTable : LogicalPlan {

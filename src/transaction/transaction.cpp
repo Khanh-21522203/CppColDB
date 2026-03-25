@@ -8,7 +8,8 @@ void Transaction::WriteToWAL(WAL& wal) const {
     undo_buffer.ForEachForward([&](const UndoEntry& entry) {
         if (const auto* e = std::get_if<CatalogUndoEntry>(&entry)) {
             if (e->was_create) {
-                wal.WriteCreateTable(e->schema, e->table, e->col_names, e->col_types);
+                wal.WriteCreateTable(e->schema, e->table, e->col_names, e->col_types,
+                                     e->partition_info);
             } else {
                 wal.WriteDropTable(e->schema, e->table);
             }

@@ -8,7 +8,8 @@ struct PhysicalCreateTable : PhysicalOperator {
     std::string schema_name;
     std::string table_name;
     std::vector<ColumnDefinition> columns;
-    bool if_not_exists = false;
+    bool          if_not_exists  = false;
+    PartitionInfo partition_info;
 
     PhysicalCreateTable() { role = OperatorRole::SOURCE; }
 

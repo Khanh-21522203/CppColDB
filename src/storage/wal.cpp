@@ -181,7 +181,8 @@ void WAL::WriteUpdate(const std::string& schema, const std::string& table,
 
 void WAL::WriteCreateTable(const std::string& schema, const std::string& table,
                            const std::vector<std::string>& col_names,
-                           const std::vector<TypeId>& col_types) {
+                           const std::vector<TypeId>& col_types,
+                           const PartitionInfo& partition_info) {
     std::vector<uint8_t> buf;
     WriteStr(buf, schema);
     WriteStr(buf, table);
@@ -189,6 +190,51 @@ void WAL::WriteCreateTable(const std::string& schema, const std::string& table,
     for (size_t i = 0; i < col_names.size(); ++i) {
         WriteStr(buf, col_names[i]);
         WriteU8(buf, static_cast<uint8_t>(col_types[i]));
+    }
+    // Partition info.
+    WriteU8(buf, static_cast<uint8_t>(partition_info.type));
+    if (partition_info.IsPartitioned()) {
+        WriteStr(buf, partition_info.partition_col);
+        WriteU32(buf, partition_info.num_partitions);
+        if (partition_info.type == PartitionType::RANGE) {
+            WriteU32(buf, static_cast<uint32_t>(partition_info.defs.size()));
+            for (const auto& def : partition_info.defs) {
+                WriteU8(buf, def.upper_bound.IsNull() ? 1u : 0u);
+                if (!def.upper_bound.IsNull()) {
+                    WriteU8(buf, static_cast<uint8_t>(def.upper_bound.type));
+                    if (def.upper_bound.type == TypeId::VARCHAR) {
+                        WriteStr(buf, def.upper_bound.GetVarchar());
+                    } else if (def.upper_bound.type == TypeId::FLOAT32 ||
+                               def.upper_bound.type == TypeId::FLOAT64) {
+                        uint64_t bits;
+                        double v = def.upper_bound.GetFloat64();
+                        std::memcpy(&bits, &v, 8);
+                        WriteU64(buf, bits);
+                    } else {
+                        WriteU64(buf, static_cast<uint64_t>(def.upper_bound.GetInt64()));
+                    }
+                }
+            }
+        } else if (partition_info.type == PartitionType::LIST) {
+            WriteU32(buf, static_cast<uint32_t>(partition_info.defs.size()));
+            for (const auto& def : partition_info.defs) {
+                WriteU32(buf, static_cast<uint32_t>(def.list_values.size()));
+                for (const auto& v : def.list_values) {
+                    WriteU8(buf, static_cast<uint8_t>(v.type));
+                    if (v.type == TypeId::VARCHAR) {
+                        WriteStr(buf, v.GetVarchar());
+                    } else if (v.type == TypeId::FLOAT32 || v.type == TypeId::FLOAT64) {
+                        uint64_t bits;
+                        double dv = v.GetFloat64();
+                        std::memcpy(&bits, &dv, 8);
+                        WriteU64(buf, bits);
+                    } else {
+                        WriteU64(buf, static_cast<uint64_t>(v.GetInt64()));
+                    }
+                }
+            }
+        }
+        // HASH: num_partitions is sufficient; no defs to write.
     }
     AppendEntry(WALEntryType::WAL_CREATE_TABLE, buf);
 }

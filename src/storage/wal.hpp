@@ -4,6 +4,7 @@
 #include <memory>
 #include <cstdint>
 #include "common/types.hpp"
+#include "storage/partition_info.hpp"
 
 namespace cppcoldb {
 
@@ -54,7 +55,8 @@ public:
                      const DataChunk& new_values);
     void WriteCreateTable(const std::string& schema, const std::string& table,
                           const std::vector<std::string>& col_names,
-                          const std::vector<TypeId>& col_types);
+                          const std::vector<TypeId>& col_types,
+                          const PartitionInfo& partition_info = PartitionInfo{});
     void WriteDropTable(const std::string& schema, const std::string& table);
     void WriteCreateSchema(const std::string& schema);
     void WriteDropSchema(const std::string& schema);

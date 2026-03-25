@@ -140,7 +140,7 @@ std::unique_ptr<OperatorState> PhysicalTableScan::CreateScanState() const {
     return std::make_unique<TableScanState>();
 }
 
-void PhysicalTableScan::InitScan(OperatorState& /*state*/, ClientContext& /*ctx*/) {
+void PhysicalTableScan::InitScan(OperatorState& /*state*/, ClientContext& ctx) {
     // --- Zone-map predicates ---
     scan_predicates_.clear();
     for (const auto& f : pushed_filters) {
@@ -187,6 +187,26 @@ void PhysicalTableScan::InitScan(OperatorState& /*state*/, ClientContext& /*ctx*
             if (f) early_filters_.push_back(CloneAndRemap(*f, full_to_early));
         }
     }
+
+    // --- Partition pruning ---
+    active_partition_ids_.clear();
+    if (ctx.catalog && ctx.transaction) {
+        TableCatalogEntry* table =
+            ctx.catalog->GetTable(schema_name, table_name, *ctx.transaction);
+        if (table && table->partition_info.IsPartitioned()) {
+            const auto& pi = table->partition_info;
+            // Remap scan predicates from chunk positions to table column indices.
+            std::vector<ScanPredicate> table_preds;
+            table_preds.reserve(scan_predicates_.size());
+            for (const auto& sp : scan_predicates_) {
+                ScanPredicate tp = sp;
+                if (sp.col_idx < column_ids.size())
+                    tp.col_idx = column_ids[sp.col_idx];
+                table_preds.push_back(tp);
+            }
+            active_partition_ids_ = pi.PrunedPartitions(table_preds);
+        }
+    }
 }
 
 OperatorResultType PhysicalTableScan::GetData(OperatorState& raw_state,
@@ -201,6 +221,102 @@ OperatorResultType PhysicalTableScan::GetData(OperatorState& raw_state,
     TableCatalogEntry* table = ctx.catalog->GetTable(schema_name, table_name, *ctx.transaction);
     if (!table) return OperatorResultType::FINISHED;
 
+    // --- Partitioned scan path ---
+    if (!active_partition_ids_.empty()) {
+        while (state.partition_idx < active_partition_ids_.size()) {
+            uint32_t pid = active_partition_ids_[state.partition_idx];
+            const auto& rg_indices = table->partition_rg_indices[pid];
+
+            while (state.row_group_idx < rg_indices.size()) {
+                RowGroup* rg = table->row_groups[rg_indices[state.row_group_idx]].get();
+
+                if (!scan_predicates_.empty()) {
+                    while (state.row_offset_in_group < rg->RowCount()) {
+                        size_t skip = rg->ZoneMapSkipRows(state.row_offset_in_group,
+                                                          scan_predicates_);
+                        if (skip == 0) break;
+                        state.row_offset_in_group += skip;
+                    }
+                }
+
+                if (state.row_offset_in_group >= rg->RowCount()) {
+                    ++state.row_group_idx;
+                    state.row_offset_in_group = 0;
+                    continue;
+                }
+
+                if (!payload_col_ids_.empty()) {
+                    DataChunk early_chunk;
+                    std::vector<uint32_t> vis_offsets;
+                    rg->ScanBatchWithOffsets(state.row_offset_in_group, filter_table_col_ids_,
+                                             early_chunk, vis_offsets, *ctx.transaction);
+                    if (state.row_offset_in_group >= rg->RowCount()) {
+                        ++state.row_group_idx;
+                        state.row_offset_in_group = 0;
+                    }
+                    if (early_chunk.count == 0) continue;
+
+                    std::vector<uint16_t> pred_sel;
+                    if (!early_filters_.empty()) {
+                        pred_sel = ExprEvaluator::EvaluatePredicate(*early_filters_[0],
+                                                                    early_chunk);
+                        for (size_t fi = 1; fi < early_filters_.size() && !pred_sel.empty(); ++fi) {
+                            auto sel2 = ExprEvaluator::EvaluatePredicate(*early_filters_[fi],
+                                                                         early_chunk);
+                            std::vector<uint16_t> inter;
+                            size_t j = 0;
+                            for (uint16_t idx : pred_sel) {
+                                while (j < sel2.size() && sel2[j] < idx) ++j;
+                                if (j < sel2.size() && sel2[j] == idx) inter.push_back(idx);
+                            }
+                            pred_sel = std::move(inter);
+                        }
+                    } else {
+                        pred_sel.resize(early_chunk.count);
+                        std::iota(pred_sel.begin(), pred_sel.end(), uint16_t{0});
+                    }
+                    if (pred_sel.empty()) continue;
+
+                    std::vector<uint32_t> final_offsets;
+                    final_offsets.reserve(pred_sel.size());
+                    for (uint16_t idx : pred_sel) final_offsets.push_back(vis_offsets[idx]);
+
+                    DataChunk late_chunk;
+                    rg->ScanLate(final_offsets, payload_table_col_ids_, late_chunk);
+
+                    output.Initialize(output_types);
+                    for (size_t i = 0; i < filter_col_ids_.size(); ++i) {
+                        DataVector& dst = output.columns[filter_col_ids_[i]];
+                        const DataVector& src = early_chunk.columns[i];
+                        for (uint16_t idx : pred_sel) DataVectorAppend(dst, src, idx);
+                    }
+                    for (size_t i = 0; i < payload_col_ids_.size(); ++i) {
+                        output.columns[payload_col_ids_[i]] = std::move(late_chunk.columns[i]);
+                    }
+                    output.count = final_offsets.size();
+                    if (output.count > 0) return OperatorResultType::HAVE_MORE_OUTPUT;
+                    continue;
+                }
+
+                size_t rows_read = rg->Scan(state.row_offset_in_group, column_ids, output,
+                                            *ctx.transaction);
+                (void)rows_read;
+                if (state.row_offset_in_group >= rg->RowCount()) {
+                    ++state.row_group_idx;
+                    state.row_offset_in_group = 0;
+                }
+                if (output.count > 0) return OperatorResultType::HAVE_MORE_OUTPUT;
+            }
+
+            // Move to next partition.
+            ++state.partition_idx;
+            state.row_group_idx       = 0;
+            state.row_offset_in_group = 0;
+        }
+        return OperatorResultType::FINISHED;
+    }
+
+    // --- Non-partitioned scan path ---
     auto& row_groups = table->row_groups;
 
     while (state.row_group_idx < row_groups.size()) {

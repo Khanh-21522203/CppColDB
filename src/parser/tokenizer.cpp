@@ -16,6 +16,7 @@ static const std::unordered_set<std::string> KEYWORD_SET = {
     "VALUES", "PRIMARY", "KEY", "DISTINCT", "IF", "EXISTS",
     "JOIN", "ON", "INNER", "LEFT", "RIGHT", "OUTER", "CROSS",
     "AS", "IN", "IS", "LIKE", "BETWEEN", "HAVING",
+    "PARTITION", "RANGE", "HASH", "LIST", "PARTITIONS",
     "INT8", "INT16", "INT32", "INT64",
     "FLOAT32", "FLOAT64", "BOOLEAN", "VARCHAR",
     "INT", "INTEGER", "FLOAT", "DOUBLE", "BOOL", "TEXT",

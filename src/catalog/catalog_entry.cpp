@@ -36,4 +36,19 @@ RowGroup* TableCatalogEntry::GetOrAddRowGroup() {
     return ptr;
 }
 
+RowGroup* TableCatalogEntry::GetOrAddRowGroupForPartition(uint32_t pid) {
+    auto& indices = partition_rg_indices[pid];
+    if (!indices.empty()) {
+        RowGroup* last = row_groups[indices.back()].get();
+        if (last->RowCount() < ROW_GROUP_SIZE)
+            return last;
+    }
+    uint32_t new_rg_id = static_cast<uint32_t>(row_groups.size());
+    auto rg = std::make_unique<RowGroup>(new_rg_id, ColumnTypes(), *bm_);
+    RowGroup* ptr = rg.get();
+    row_groups.push_back(std::move(rg));
+    indices.push_back(new_rg_id);
+    return ptr;
+}
+
 } // namespace cppcoldb
