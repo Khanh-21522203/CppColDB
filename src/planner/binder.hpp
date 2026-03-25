@@ -26,6 +26,7 @@ private:
     std::unique_ptr<LogicalPlan> BindDelete      (const DeleteStatement&      stmt);
     std::unique_ptr<LogicalPlan> BindCreateTable (const CreateTableStatement& stmt);
     std::unique_ptr<LogicalPlan> BindDropTable   (const DropTableStatement&   stmt);
+    std::unique_ptr<LogicalPlan> BindAlterTable  (const AlterTableStatement&  stmt);
 
     // Expression binder
     std::unique_ptr<LogicalExpr> BindExpr(const Expr& expr, const BindContext& ctx,

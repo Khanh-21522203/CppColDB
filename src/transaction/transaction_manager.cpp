@@ -149,6 +149,11 @@ void TransactionManager::UndoBufferReverse(Transaction& tx) {
                     rg.GetVersionInfo().RevertUpdate(off);
                 }
             }
+        } else if (const auto* e = std::get_if<AlterPartitionUndoEntry>(&entry)) {
+            // Restore old partition state.
+            catalog_.RestorePartitionState(e->schema, e->table,
+                                           e->old_partition_info,
+                                           e->old_partition_rg_indices, tx);
         }
     });
 }

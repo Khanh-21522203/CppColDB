@@ -434,6 +434,11 @@ std::unique_ptr<LogicalPlan> Optimizer::PruneColumns(
                 return plan;
             }
 
+            // Also keep columns referenced by pushed_filters (set after predicate pushdown).
+            for (const auto& f : get.pushed_filters) {
+                if (f) CollectColumnRefs(*f, required_cols);
+            }
+
             // Save originals
             auto old_col_ids   = get.column_ids;
             auto old_types     = get.output_types;

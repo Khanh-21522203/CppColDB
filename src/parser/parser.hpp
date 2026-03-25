@@ -25,6 +25,7 @@ private:
     std::unique_ptr<DeleteStatement>      ParseDelete();
     std::unique_ptr<CreateTableStatement> ParseCreateTable();
     std::unique_ptr<DropTableStatement>   ParseDropTable();
+    std::unique_ptr<AlterTableStatement>  ParseAlterTable();
     std::unique_ptr<TransactionStatement> ParseTransaction(ParsedStatement::Type type);
     std::unique_ptr<ExplainStatement>     ParseExplain();
 

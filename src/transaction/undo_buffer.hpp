@@ -42,15 +42,32 @@ struct UpdateUndoEntry {
     DataChunk           new_values; // for WAL (redo)
 };
 
+// Undo entry for ALTER TABLE DROP/ADD PARTITION.
+// Stores a full snapshot of the old partition state for rollback.
+struct AlterPartitionUndoEntry {
+    enum class AlterKind : uint8_t { DROP_PARTITION = 0, ADD_PARTITION = 1 };
+    std::string  schema;
+    std::string  table;
+    AlterKind    kind;
+    // Snapshot of pre-alter state (restored on rollback).
+    PartitionInfo                    old_partition_info;
+    std::vector<std::vector<size_t>> old_partition_rg_indices;
+    // For WAL redo at commit.
+    PartitionInfo                    new_partition_info;
+    std::vector<std::vector<size_t>> new_partition_rg_indices;
+};
+
 using UndoEntry = std::variant<CatalogUndoEntry, InsertUndoEntry,
-                                DeleteUndoEntry,  UpdateUndoEntry>;
+                                DeleteUndoEntry,  UpdateUndoEntry,
+                                AlterPartitionUndoEntry>;
 
 class UndoBuffer {
 public:
-    void PushCatalogEntry(CatalogUndoEntry e) { entries_.push_back(std::move(e)); }
-    void PushInsert(InsertUndoEntry e)         { entries_.push_back(std::move(e)); }
-    void PushDelete(DeleteUndoEntry e)         { entries_.push_back(std::move(e)); }
-    void PushUpdate(UpdateUndoEntry e)         { entries_.push_back(std::move(e)); }
+    void PushCatalogEntry   (CatalogUndoEntry e)         { entries_.push_back(std::move(e)); }
+    void PushInsert         (InsertUndoEntry e)          { entries_.push_back(std::move(e)); }
+    void PushDelete         (DeleteUndoEntry e)          { entries_.push_back(std::move(e)); }
+    void PushUpdate         (UpdateUndoEntry e)          { entries_.push_back(std::move(e)); }
+    void PushAlterPartition (AlterPartitionUndoEntry e)  { entries_.push_back(std::move(e)); }
 
     void ForEachForward(std::function<void(const UndoEntry&)> fn) const;
     void ForEachReverse(std::function<void(const UndoEntry&)> fn) const;

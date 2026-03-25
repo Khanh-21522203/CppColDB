@@ -126,6 +126,72 @@ void Catalog::DropTable(const std::string& schema, const std::string& name,
     s->MarkDeleted(name, tx);
 }
 
+void Catalog::DropPartition(const std::string& schema, const std::string& name,
+                             uint32_t pid, const Transaction& tx,
+                             PartitionInfo& old_pi_out,
+                             std::vector<std::vector<size_t>>& old_rg_out) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto* s = GetSchema(schema);
+    if (!s) throw BindError("Schema not found: " + schema);
+    auto* entry = static_cast<TableCatalogEntry*>(s->GetEntry(name, tx, OnNotFound::THROW));
+
+    old_pi_out  = entry->partition_info;
+    old_rg_out  = entry->partition_rg_indices;
+
+    auto& pi = entry->partition_info;
+    // Remove partition definition and its row-group index list.
+    pi.defs.erase(pi.defs.begin() + pid);
+    pi.num_partitions -= 1;
+    entry->partition_rg_indices.erase(entry->partition_rg_indices.begin() + pid);
+}
+
+void Catalog::AddPartition(const std::string& schema, const std::string& name,
+                            const std::vector<Value>& new_bound,
+                            const std::vector<std::vector<Value>>& new_values,
+                            const Transaction& tx,
+                            PartitionInfo& old_pi_out,
+                            std::vector<std::vector<size_t>>& old_rg_out) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto* s = GetSchema(schema);
+    if (!s) throw BindError("Schema not found: " + schema);
+    auto* entry = static_cast<TableCatalogEntry*>(s->GetEntry(name, tx, OnNotFound::THROW));
+
+    old_pi_out  = entry->partition_info;
+    old_rg_out  = entry->partition_rg_indices;
+
+    auto& pi = entry->partition_info;
+    if (pi.type == PartitionType::RANGE) {
+        // The last partition is currently open-ended (empty upper_bounds).
+        // Set its upper_bounds to new_bound and add a new open-ended partition after it.
+        if (!pi.defs.empty())
+            pi.defs.back().upper_bounds = new_bound;
+        PartitionDef new_def;
+        // new_def.upper_bounds stays empty (open-ended)
+        pi.defs.push_back(std::move(new_def));
+    } else {
+        // LIST
+        PartitionDef new_def;
+        new_def.list_values = new_values;
+        pi.defs.push_back(std::move(new_def));
+    }
+    pi.num_partitions += 1;
+    entry->partition_rg_indices.push_back({});
+}
+
+void Catalog::RestorePartitionState(const std::string& schema, const std::string& name,
+                                     const PartitionInfo& pi,
+                                     const std::vector<std::vector<size_t>>& rg_indices,
+                                     const Transaction& tx) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto* s = GetSchema(schema);
+    if (!s) return;
+    auto* entry = static_cast<TableCatalogEntry*>(
+        s->GetEntry(name, tx, OnNotFound::RETURN_NULL));
+    if (!entry) return;
+    entry->partition_info       = pi;
+    entry->partition_rg_indices = rg_indices;
+}
+
 void Catalog::CommitEntry(const std::string& schema, const std::string& name,
                            TransactionId tx_id, timestamp_t commit_time) {
     std::lock_guard<std::mutex> lk(mu_);
@@ -231,45 +297,38 @@ void Catalog::Serialize(uint8_t* block, size_t /*block_size*/) const {
             const auto& pi = tbl->partition_info;
             CkptWriteU8(p, (uint8_t)pi.type);
             if (pi.IsPartitioned()) {
-                CkptWriteStr(p, pi.partition_col);
+                // Write key columns (nkeys + each name).
+                CkptWriteU32(p, (uint32_t)pi.partition_cols.size());
+                for (const auto& col : pi.partition_cols) CkptWriteStr(p, col);
                 CkptWriteU32(p, pi.num_partitions);
+
+                // Helper: write one Value.
+                auto WriteVal = [&](const Value& v) {
+                    CkptWriteU8(p, (uint8_t)v.type);
+                    if (v.type == TypeId::VARCHAR) {
+                        CkptWriteStr(p, v.GetVarchar());
+                    } else if (v.type == TypeId::FLOAT32 || v.type == TypeId::FLOAT64) {
+                        uint64_t bits; double dv = v.GetFloat64();
+                        std::memcpy(&bits, &dv, 8); CkptWriteU64(p, bits);
+                    } else {
+                        CkptWriteU64(p, (uint64_t)v.GetInt64());
+                    }
+                };
+
                 if (pi.type == PartitionType::RANGE) {
-                    // Write N upper bounds (last is null → written as empty string with flag).
+                    // For each def: write nub (0 = open upper bound, else write nub values).
                     CkptWriteU32(p, (uint32_t)pi.defs.size());
                     for (const auto& def : pi.defs) {
-                        CkptWriteU8(p, def.upper_bound.IsNull() ? 1u : 0u);
-                        if (!def.upper_bound.IsNull()) {
-                            CkptWriteU8(p, (uint8_t)def.upper_bound.type);
-                            if (def.upper_bound.type == TypeId::VARCHAR) {
-                                CkptWriteStr(p, def.upper_bound.GetVarchar());
-                            } else if (def.upper_bound.type == TypeId::FLOAT32 ||
-                                       def.upper_bound.type == TypeId::FLOAT64) {
-                                uint64_t bits;
-                                double v = def.upper_bound.GetFloat64();
-                                std::memcpy(&bits, &v, 8);
-                                CkptWriteU64(p, bits);
-                            } else {
-                                CkptWriteU64(p, (uint64_t)def.upper_bound.GetInt64());
-                            }
-                        }
+                        CkptWriteU32(p, (uint32_t)def.upper_bounds.size()); // 0 = open
+                        for (const auto& v : def.upper_bounds) WriteVal(v);
                     }
                 } else if (pi.type == PartitionType::LIST) {
                     CkptWriteU32(p, (uint32_t)pi.defs.size());
                     for (const auto& def : pi.defs) {
-                        CkptWriteU32(p, (uint32_t)def.list_values.size());
-                        for (const auto& v : def.list_values) {
-                            CkptWriteU8(p, (uint8_t)v.type);
-                            if (v.type == TypeId::VARCHAR) {
-                                CkptWriteStr(p, v.GetVarchar());
-                            } else if (v.type == TypeId::FLOAT32 ||
-                                       v.type == TypeId::FLOAT64) {
-                                uint64_t bits;
-                                double dv = v.GetFloat64();
-                                std::memcpy(&bits, &dv, 8);
-                                CkptWriteU64(p, bits);
-                            } else {
-                                CkptWriteU64(p, (uint64_t)v.GetInt64());
-                            }
+                        CkptWriteU32(p, (uint32_t)def.list_values.size()); // # tuples
+                        for (const auto& tuple : def.list_values) {
+                            CkptWriteU32(p, (uint32_t)tuple.size());       // # key cols
+                            for (const auto& v : tuple) WriteVal(v);
                         }
                     }
                 }
@@ -348,52 +407,44 @@ void Catalog::Deserialize(const uint8_t* block, size_t /*block_size*/) {
             pi.type = (PartitionType)CkptReadU8(p);
             std::vector<std::vector<size_t>> partition_rg_indices_loaded;
             if (pi.IsPartitioned()) {
-                pi.partition_col = CkptReadStr(p);
+                uint32_t nkeys = CkptReadU32(p);
+                for (uint32_t k = 0; k < nkeys; ++k) pi.partition_cols.push_back(CkptReadStr(p));
                 pi.num_partitions = CkptReadU32(p);
+
+                // Helper: read one Value.
+                auto ReadVal = [&]() -> Value {
+                    TypeId vtype = (TypeId)CkptReadU8(p);
+                    if (vtype == TypeId::VARCHAR) return Value::Varchar(CkptReadStr(p));
+                    if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
+                        uint64_t bits = CkptReadU64(p);
+                        double v; std::memcpy(&v, &bits, 8);
+                        Value rv = Value::Float(v); rv.type = vtype; return rv;
+                    }
+                    int64_t iv = (int64_t)CkptReadU64(p);
+                    Value rv = Value::Integer(iv); rv.type = vtype; return rv;
+                };
+
                 if (pi.type == PartitionType::RANGE) {
                     uint32_t def_count = CkptReadU32(p);
                     pi.defs.resize(def_count);
-                    for (uint32_t di = 0; di < def_count; di++) {
-                        bool is_null = CkptReadU8(p) != 0;
-                        if (!is_null) {
-                            TypeId vtype = (TypeId)CkptReadU8(p);
-                            if (vtype == TypeId::VARCHAR) {
-                                pi.defs[di].upper_bound = Value::Varchar(CkptReadStr(p));
-                            } else if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
-                                uint64_t bits = CkptReadU64(p);
-                                double v; std::memcpy(&v, &bits, 8);
-                                pi.defs[di].upper_bound = Value::Float(v);
-                                pi.defs[di].upper_bound.type = vtype;
-                            } else {
-                                int64_t v = (int64_t)CkptReadU64(p);
-                                pi.defs[di].upper_bound = Value::Integer(v);
-                                pi.defs[di].upper_bound.type = vtype;
-                            }
-                        }
-                        // is_null → upper_bound stays default (IsNull() == true)
+                    for (uint32_t di = 0; di < def_count; ++di) {
+                        uint32_t nub = CkptReadU32(p); // 0 = open upper bound
+                        for (uint32_t k = 0; k < nub; ++k)
+                            pi.defs[di].upper_bounds.push_back(ReadVal());
                     }
                 } else if (pi.type == PartitionType::LIST) {
                     uint32_t def_count = CkptReadU32(p);
                     pi.defs.resize(def_count);
-                    for (uint32_t di = 0; di < def_count; di++) {
-                        uint32_t val_count = CkptReadU32(p);
-                        pi.defs[di].list_values.reserve(val_count);
-                        for (uint32_t vi = 0; vi < val_count; vi++) {
-                            TypeId vtype = (TypeId)CkptReadU8(p);
-                            Value v;
-                            if (vtype == TypeId::VARCHAR) {
-                                v = Value::Varchar(CkptReadStr(p));
-                            } else if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
-                                uint64_t bits = CkptReadU64(p);
-                                double dv; std::memcpy(&dv, &bits, 8);
-                                v = Value::Float(dv);
-                                v.type = vtype;
-                            } else {
-                                int64_t iv = (int64_t)CkptReadU64(p);
-                                v = Value::Integer(iv);
-                                v.type = vtype;
-                            }
-                            pi.defs[di].list_values.push_back(std::move(v));
+                    for (uint32_t di = 0; di < def_count; ++di) {
+                        uint32_t ntup = CkptReadU32(p);
+                        pi.defs[di].list_values.reserve(ntup);
+                        for (uint32_t j = 0; j < ntup; ++j) {
+                            uint32_t ncols = CkptReadU32(p);
+                            std::vector<Value> tuple;
+                            tuple.reserve(ncols);
+                            for (uint32_t k = 0; k < ncols; ++k)
+                                tuple.push_back(ReadVal());
+                            pi.defs[di].list_values.push_back(std::move(tuple));
                         }
                     }
                 }
@@ -467,10 +518,14 @@ void Catalog::Deserialize(const uint8_t* block, size_t /*block_size*/) {
             }
             if (!tbl_entry) continue;
 
-            // Restore partition column index.
+            // Restore partition column indices.
             if (tbl_entry->partition_info.IsPartitioned()) {
-                int idx = tbl_entry->FindColumn(tbl_entry->partition_info.partition_col);
-                tbl_entry->partition_info.partition_col_idx = idx;
+                auto& pi = tbl_entry->partition_info;
+                pi.partition_col_idxs.clear();
+                for (const auto& pcol : pi.partition_cols) {
+                    int idx = tbl_entry->FindColumn(pcol);
+                    pi.partition_col_idxs.push_back(idx);
+                }
                 tbl_entry->partition_rg_indices = std::move(partition_rg_indices_loaded);
             }
 

@@ -105,6 +105,7 @@ struct ParsedStatement {
         DELETE,
         CREATE_TABLE,
         DROP_TABLE,
+        ALTER_TABLE,
         BEGIN,
         COMMIT,
         ROLLBACK,
@@ -140,7 +141,8 @@ struct InsertStatement : ParsedStatement {
     std::string              table_name;
     std::string              schema_name;
     std::vector<std::string> column_names; // empty → all columns in table order
-    std::vector<std::vector<std::unique_ptr<Expr>>> values; // one inner vec per row
+    std::vector<std::vector<std::unique_ptr<Expr>>> values; // one inner vec per row (VALUES path)
+    std::unique_ptr<SelectStatement> select_stmt; // non-null for INSERT...SELECT
 };
 
 struct UpdateSetClause {
@@ -172,16 +174,17 @@ struct CreateTableStatement : ParsedStatement {
 
     // Partition specification (optional).
     enum class PartitionKind { NONE, RANGE, HASH, LIST };
-    PartitionKind            partition_kind = PartitionKind::NONE;
-    std::string              partition_col;
-    uint32_t                 hash_partition_count = 0; // HASH only
+    PartitionKind                partition_kind = PartitionKind::NONE;
+    std::vector<std::string>     partition_cols;          // 1+ key column names
+    uint32_t                     hash_partition_count = 0; // HASH only
 
-    // RANGE: ordered split-point literals (N-1 bounds → N partitions).
-    // E.g. {100, 200, 300} → 4 partitions: <100, [100,200), [200,300), >=300
-    std::vector<std::unique_ptr<Expr>> range_bounds;
+    // RANGE: range_bounds[i][k] = k-th key column expression for the i-th split-point.
+    // Single-key: range_bounds[i] is a 1-element vector.
+    std::vector<std::vector<std::unique_ptr<Expr>>> range_bounds;
 
-    // LIST: list_values[i] = value literals for partition i.
-    std::vector<std::vector<std::unique_ptr<Expr>>> list_values;
+    // LIST: list_values[i][j][k] = k-th key column expression for the j-th tuple of partition i.
+    // Single-key: list_values[i][j] is a 1-element vector.
+    std::vector<std::vector<std::vector<std::unique_ptr<Expr>>>> list_values;
 };
 
 struct DropTableStatement : ParsedStatement {
@@ -189,6 +192,20 @@ struct DropTableStatement : ParsedStatement {
     std::string schema_name;
     std::string table_name;
     bool        if_exists = false;
+};
+
+struct AlterTableStatement : ParsedStatement {
+    AlterTableStatement() { stmt_type = Type::ALTER_TABLE; }
+    enum class AlterKind { DROP_PARTITION, ADD_PARTITION };
+    AlterKind   kind        = AlterKind::DROP_PARTITION;
+    std::string schema_name;
+    std::string table_name;
+    // DROP PARTITION: partition index to remove.
+    uint32_t    partition_idx = 0;
+    // ADD PARTITION (RANGE): new upper bound tuple (one expr per key column).
+    std::vector<std::unique_ptr<Expr>> new_range_bound;
+    // ADD PARTITION (LIST): new value tuples for the new partition; [j][k] = j-th tuple, k-th col.
+    std::vector<std::vector<std::unique_ptr<Expr>>> new_list_values;
 };
 
 struct TransactionStatement : ParsedStatement {

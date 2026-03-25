@@ -28,6 +28,7 @@ private:
     std::unique_ptr<PhysicalOperator> PlanUpdate     (const LogicalUpdate&     node);
     std::unique_ptr<PhysicalOperator> PlanCreateTable(const LogicalCreateTable& node);
     std::unique_ptr<PhysicalOperator> PlanDropTable  (const LogicalDropTable&  node);
+    std::unique_ptr<PhysicalOperator> PlanAlterTable (const LogicalAlterTable& node);
 
     // Remap BoundColumnRef::column_idx from table-global index to chunk-position index.
     // column_ids[chunk_pos] = table_col_idx  (maps chunk position -> table column index)

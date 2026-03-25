@@ -1,4 +1,5 @@
 #pragma once
+#include "storage/partition_info.hpp"
 #include <memory>
 #include <string>
 #include <vector>
@@ -91,6 +92,7 @@ struct LogicalPlan {
         UPDATE,
         CREATE_TABLE,
         DROP_TABLE,
+        ALTER_TABLE,
     };
     Type node_type;
     std::vector<std::unique_ptr<LogicalPlan>> children;
@@ -107,6 +109,8 @@ struct LogicalGet : LogicalPlan {
     std::string              table_name;
     std::vector<size_t>      column_ids;          // which columns to read
     uint64_t                 catalog_row_count = 0;
+    // Partition metadata (copied from catalog at bind time for EXPLAIN).
+    PartitionInfo            partition_info;
     // Zone-map / predicate push-down hints for the optimizer.
     std::vector<std::unique_ptr<LogicalExpr>> pushed_filters;
 };
@@ -159,7 +163,8 @@ struct LogicalInsert : LogicalPlan {
     std::string         schema_name;
     std::string         table_name;
     std::vector<size_t> column_ids;  // target column indices in table order
-    DataChunk           rows;        // pre-evaluated literal values to insert
+    DataChunk           rows;        // pre-evaluated literal values (VALUES path)
+    bool                has_select_source = false; // children[0] = SELECT plan
 };
 
 // children[0] is LogicalFilter(LogicalGet) — identifies rows to delete.
@@ -192,6 +197,17 @@ struct LogicalDropTable : LogicalPlan {
     std::string schema_name;
     std::string table_name;
     bool        if_exists = false;
+};
+
+struct LogicalAlterTable : LogicalPlan {
+    LogicalAlterTable() { node_type = Type::ALTER_TABLE; }
+    enum class AlterKind { DROP_PARTITION, ADD_PARTITION };
+    AlterKind   kind         = AlterKind::DROP_PARTITION;
+    std::string schema_name;
+    std::string table_name;
+    uint32_t    partition_idx = 0; // DROP
+    std::vector<Value>              new_bound;  // ADD RANGE: one Value per key col; empty = open-ended
+    std::vector<std::vector<Value>> new_values; // ADD LIST: outer=tuples, inner=key cols
 };
 
 } // namespace cppcoldb

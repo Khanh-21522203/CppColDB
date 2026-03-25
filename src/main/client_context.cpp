@@ -10,6 +10,7 @@
 #include "catalog/catalog.hpp"
 #include "transaction/transaction.hpp"
 #include "common/exception.hpp"
+#include "storage/partition_info.hpp"
 #include <sstream>
 
 namespace cppcoldb {
@@ -25,6 +26,18 @@ static std::string FormatLogicalPlan(const LogicalPlan& node, int depth = 0) {
         case LogicalPlan::Type::GET: {
             const auto& g = static_cast<const LogicalGet&>(node);
             oss << indent << "Scan " << g.schema_name << "." << g.table_name;
+            if (g.partition_info.IsPartitioned()) {
+                const auto& pi = g.partition_info;
+                const char* pt = (pi.type == PartitionType::RANGE) ? "RANGE"
+                               : (pi.type == PartitionType::HASH)  ? "HASH"
+                                                                    : "LIST";
+                oss << " [partition=" << pt << "(";
+                for (size_t k = 0; k < pi.partition_cols.size(); ++k) {
+                    if (k) oss << ",";
+                    oss << pi.partition_cols[k];
+                }
+                oss << "), partitions=" << pi.num_partitions << "]";
+            }
             break;
         }
         case LogicalPlan::Type::FILTER:
@@ -72,6 +85,16 @@ static std::string FormatLogicalPlan(const LogicalPlan& node, int depth = 0) {
         case LogicalPlan::Type::DROP_TABLE: {
             const auto& dt = static_cast<const LogicalDropTable&>(node);
             oss << indent << "DropTable " << dt.schema_name << "." << dt.table_name;
+            break;
+        }
+        case LogicalPlan::Type::ALTER_TABLE: {
+            const auto& at = static_cast<const LogicalAlterTable&>(node);
+            if (at.kind == LogicalAlterTable::AlterKind::DROP_PARTITION)
+                oss << indent << "AlterTable " << at.schema_name << "." << at.table_name
+                    << " DROP PARTITION " << at.partition_idx;
+            else
+                oss << indent << "AlterTable " << at.schema_name << "." << at.table_name
+                    << " ADD PARTITION";
             break;
         }
         default:

@@ -128,6 +128,12 @@ add_phase_tests(test_integration
     test/integration/test_end_to_end.cpp
 )
 
+# Partition features (Steps 1-8)
+add_phase_tests(test_partition
+    test/partition/test_partition_main.cpp
+    test/partition/test_partition.cpp
+)
+
 # Benchmark executable (not a ctest target)
 add_executable(benchmark_cppcoldb
     test/benchmark/benchmark_main.cpp

@@ -28,6 +28,9 @@ void Transaction::WriteToWAL(WAL& wal) const {
             if (!e->row_ids.empty() && e->new_values.count > 0) {
                 wal.WriteUpdate(e->schema, e->table, e->col_ids, e->row_ids, e->new_values);
             }
+        } else if (const auto* e = std::get_if<AlterPartitionUndoEntry>(&entry)) {
+            wal.WriteAlterTable(e->schema, e->table,
+                                e->new_partition_info, e->new_partition_rg_indices);
         }
     });
     wal.Flush();

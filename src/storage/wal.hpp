@@ -17,6 +17,7 @@ enum class WALEntryType : uint8_t {
     WAL_CREATE_SCHEMA = 6,
     WAL_DROP_SCHEMA   = 7,
     WAL_CHECKPOINT    = 8,
+    WAL_ALTER_TABLE   = 9,
 };
 
 // Fixed 5-byte entry header (packed to avoid padding).
@@ -58,6 +59,10 @@ public:
                           const std::vector<TypeId>& col_types,
                           const PartitionInfo& partition_info = PartitionInfo{});
     void WriteDropTable(const std::string& schema, const std::string& table);
+    // ALTER TABLE: write new partition state (result of DROP/ADD PARTITION).
+    void WriteAlterTable(const std::string& schema, const std::string& table,
+                         const PartitionInfo& new_pi,
+                         const std::vector<std::vector<size_t>>& new_rg_indices);
     void WriteCreateSchema(const std::string& schema);
     void WriteDropSchema(const std::string& schema);
     void WriteCheckpointMarker();

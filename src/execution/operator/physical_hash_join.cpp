@@ -6,10 +6,43 @@ namespace cppcoldb {
 // PhysicalHashJoinBuild::Consume
 // ---------------------------------------------------------------------------
 
+// Extract a Value from one column of a DataChunk at a given row.
+static Value ExtractColValue(const DataChunk& chunk, int col_idx, size_t row) {
+    const auto& v = chunk.columns[col_idx];
+    TypeId t = v.type;
+    if (t == TypeId::FLOAT32 || t == TypeId::FLOAT64) {
+        Value k = Value::Float(v.float_data[row]); k.type = t; return k;
+    }
+    if (t == TypeId::VARCHAR) return Value::Varchar(v.str_data[row]);
+    Value k = Value::Integer(v.int_data[row]); k.type = t; return k;
+}
+
+// Build composite partition key into stack-allocated array; return number of keys used.
+static uint32_t RoutePartition(const DataChunk& chunk,
+                                const PartitionInfo& pinfo,
+                                const std::vector<int>& col_idxs,
+                                size_t row) {
+    Value keys[8];
+    size_t used = std::min(col_idxs.size(), size_t(8));
+    for (size_t k = 0; k < used; ++k)
+        keys[k] = ExtractColValue(chunk, col_idxs[k], row);
+    return pinfo.RouteRow(keys, used);
+}
+
 void PhysicalHashJoinBuild::Consume(const DataChunk& input, OperatorState& /*state*/,
                                     ClientContext& /*ctx*/) {
-    for (size_t row = 0; row < input.count; ++row) {
-        ht->Insert(key_col_idxs, input, row);
+    if (!partition_hts.empty()) {
+        // Partition-wise: route each row to its partition's hash table.
+        const auto& right_col_idxs = right_partition_info.partition_col_idxs;
+        for (size_t row = 0; row < input.count; ++row) {
+            uint32_t pid = RoutePartition(input, right_partition_info, right_col_idxs, row);
+            if (pid < partition_hts.size())
+                partition_hts[pid]->Insert(key_col_idxs, input, row);
+        }
+    } else {
+        for (size_t row = 0; row < input.count; ++row) {
+            ht->Insert(key_col_idxs, input, row);
+        }
     }
 }
 
@@ -87,14 +120,33 @@ OperatorResultType PhysicalHashJoinProbe::Execute(const DataChunk& input, DataCh
     // Phase 1: Batch-compute hashes for all input rows directly from typed arrays.
     // This replaces per-row Value boxing + HashKey() variant dispatch.
     size_t hashes[STANDARD_VECTOR_SIZE];
-    ht->ComputeHashes(input, left_key_col_idxs, hashes, input.count);
+
+    // For partition-wise join: pre-compute partition IDs and select per-row HT.
+    // ComputeHashes is key-structure-agnostic so one call covers all partitions.
+    const bool pw_join = !partition_hts.empty();
+    uint32_t   part_ids[STANDARD_VECTOR_SIZE] = {};
+    if (pw_join) {
+        const auto& left_col_idxs = left_partition_info.partition_col_idxs;
+        for (size_t r = 0; r < input.count; ++r)
+            part_ids[r] = RoutePartition(input, left_partition_info, left_col_idxs, r);
+        // Use first non-empty HT for hash computation (hash function is shared).
+        JoinHashTable* any_ht = partition_hts[0].get();
+        any_ht->ComputeHashes(input, left_key_col_idxs, hashes, input.count);
+    } else {
+        ht->ComputeHashes(input, left_key_col_idxs, hashes, input.count);
+    }
 
     size_t row  = state.probe_row_idx;
     size_t midx = state.match_idx;
 
     while (row < input.count) {
+        // Select hash table for this row.
+        JoinHashTable* active_ht = pw_join
+            ? (part_ids[row] < partition_hts.size() ? partition_hts[part_ids[row]].get() : nullptr)
+            : ht.get();
+        if (!active_ht) { ++row; midx = 0; continue; }
         // Phase 2: Lookup precomputed hash — no per-row hash recomputation.
-        const auto& candidates = ht->ProbeByHash(hashes[row]);
+        const auto& candidates = active_ht->ProbeByHash(hashes[row]);
 
         // Skip rows with no matches entirely (no probe_key build needed).
         if (candidates.empty()) {

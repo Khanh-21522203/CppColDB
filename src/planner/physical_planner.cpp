@@ -13,6 +13,7 @@
 #include "execution/operator/physical_aggregation_source.hpp"
 #include "execution/operator/physical_hash_join.hpp"
 #include "execution/operator/physical_insert.hpp"
+#include "execution/operator/physical_alter_table.hpp"
 #include "common/exception.hpp"
 #include <algorithm>
 #include <cstdint>
@@ -98,6 +99,8 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanNode(const LogicalPlan& p
             return PlanCreateTable(static_cast<const LogicalCreateTable&>(plan));
         case LogicalPlan::Type::DROP_TABLE:
             return PlanDropTable(static_cast<const LogicalDropTable&>(plan));
+        case LogicalPlan::Type::ALTER_TABLE:
+            return PlanAlterTable(static_cast<const LogicalAlterTable&>(plan));
         case LogicalPlan::Type::AGGREGATE:
             return PlanAggregate(static_cast<const LogicalAggregate&>(plan));
         case LogicalPlan::Type::JOIN:
@@ -339,6 +342,25 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanDropTable(
 }
 
 // ---------------------------------------------------------------------------
+// PlanAlterTable
+// ---------------------------------------------------------------------------
+
+std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanAlterTable(
+    const LogicalAlterTable& node) {
+
+    auto op = std::make_unique<PhysicalAlterTable>();
+    op->schema_name    = node.schema_name;
+    op->table_name     = node.table_name;
+    op->kind           = node.kind;
+    op->partition_idx  = node.partition_idx;
+    op->new_bound      = node.new_bound;
+    op->new_values     = node.new_values;
+    op->output_types   = {};
+    op->output_names   = {};
+    return op;
+}
+
+// ---------------------------------------------------------------------------
 // PlanAggregate
 // ---------------------------------------------------------------------------
 
@@ -409,8 +431,43 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanAggregate(
 // ---------------------------------------------------------------------------
 
 std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanJoin(const LogicalJoin& node) {
-    // Shared hash table between build (SINK) and probe (OPERATOR).
+    // --- Partition-wise join eligibility check ---
+    // Both tables must be partitioned with the same type/count,
+    // and the single join key must match the partition key on both sides.
+    bool use_partition_wise = false;
+    uint32_t num_parts = 0;
+    const LogicalGet* left_get  = TryFindLogicalGet(*node.children[0]);
+    const LogicalGet* right_get = TryFindLogicalGet(*node.children[1]);
+    if (left_get && right_get &&
+        left_get->partition_info.IsPartitioned() &&
+        right_get->partition_info.IsPartitioned() &&
+        left_get->partition_info.type == right_get->partition_info.type &&
+        left_get->partition_info.num_partitions == right_get->partition_info.num_partitions) {
+        // Check that join keys match partition keys (prefix check for composite keys).
+        const auto& lpi = left_get->partition_info;
+        const auto& rpi = right_get->partition_info;
+        size_t nkeys = std::min({lpi.partition_col_idxs.size(),
+                                 rpi.partition_col_idxs.size(),
+                                 node.left_key_col_ids.size(),
+                                 node.right_key_col_ids.size()});
+        bool keys_match = (nkeys > 0);
+        for (size_t k = 0; k < nkeys && keys_match; ++k) {
+            if (static_cast<int>(node.left_key_col_ids[k])  != lpi.partition_col_idxs[k]) keys_match = false;
+            if (static_cast<int>(node.right_key_col_ids[k]) != rpi.partition_col_idxs[k]) keys_match = false;
+        }
+        if (keys_match) {
+            use_partition_wise = true;
+            num_parts = lpi.num_partitions;
+        }
+    }
+
+    // Shared hash table(s) between build (SINK) and probe (OPERATOR).
     auto ht = std::make_shared<JoinHashTable>();
+    std::vector<std::shared_ptr<JoinHashTable>> partition_hts;
+    if (use_partition_wise) {
+        partition_hts.resize(num_parts);
+        for (auto& p : partition_hts) p = std::make_shared<JoinHashTable>();
+    }
 
     // Build side: plan the right child (children[1]).
     auto right_child = PlanNode(*node.children[1]);
@@ -420,6 +477,10 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanJoin(const LogicalJoin& n
     build->key_col_idxs = node.right_key_col_ids;
     build->output_types = right_child->output_types;
     build->output_names = right_child->output_names;
+    if (use_partition_wise) {
+        build->partition_hts        = partition_hts;
+        build->right_partition_info = right_get->partition_info;
+    }
     build->children.push_back(std::move(right_child));
 
     // Probe side: plan the left child (children[0]).
@@ -431,6 +492,10 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanJoin(const LogicalJoin& n
     probe->left_col_count     = node.children[0]->output_types.size();
     probe->output_types       = node.output_types;
     probe->output_names       = node.output_names;
+    if (use_partition_wise) {
+        probe->partition_hts       = partition_hts;
+        probe->left_partition_info = left_get->partition_info;
+    }
     probe->build_op           = std::move(build); // executor uses this for build pipeline
     probe->children.push_back(std::move(left_child));
 
@@ -443,12 +508,18 @@ std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanJoin(const LogicalJoin& n
 
 std::unique_ptr<PhysicalOperator> PhysicalPlanner::PlanInsert(const LogicalInsert& node) {
     auto op = std::make_unique<PhysicalInsert>();
-    op->schema_name  = node.schema_name;
-    op->table_name   = node.table_name;
-    op->column_ids   = node.column_ids;
-    op->rows         = node.rows;  // copy pre-evaluated DataChunk
-    op->output_types = {};
-    op->output_names = {};
+    op->schema_name        = node.schema_name;
+    op->table_name         = node.table_name;
+    op->column_ids         = node.column_ids;
+    op->rows               = node.rows;  // empty for SELECT path
+    op->has_select_source  = node.has_select_source;
+    op->output_types       = {};
+    op->output_names       = {};
+    if (node.has_select_source) {
+        op->role = OperatorRole::SINK; // pipeline: SELECT → PhysicalInsert(SINK)
+        if (!node.children.empty())
+            op->children.push_back(PlanNode(*node.children[0]));
+    }
     return op;
 }
 

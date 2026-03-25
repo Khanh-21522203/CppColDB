@@ -204,51 +204,47 @@ void Database::ReplayWAL() {
                 PartitionInfo pi;
                 pi.type = (PartitionType)RdU8(p);
                 if (pi.IsPartitioned()) {
-                    pi.partition_col  = RdStr(p);
+                    uint32_t nkeys = RdU32(p);
+                    for (uint32_t k = 0; k < nkeys; ++k) pi.partition_cols.push_back(RdStr(p));
                     pi.num_partitions = RdU32(p);
-                    // Resolve partition_col_idx from cols.
-                    for (int ci = 0; ci < (int)cols.size(); ++ci) {
-                        if (cols[ci].name == pi.partition_col) {
-                            pi.partition_col_idx = ci; break;
+                    // Resolve partition_col_idxs from cols.
+                    for (const auto& pcol : pi.partition_cols) {
+                        for (int ci = 0; ci < (int)cols.size(); ++ci) {
+                            if (cols[ci].name == pcol) {
+                                pi.partition_col_idxs.push_back(ci); break;
+                            }
                         }
                     }
+
+                    auto RdVal = [&]() -> Value {
+                        TypeId vtype = (TypeId)RdU8(p);
+                        if (vtype == TypeId::VARCHAR) return Value::Varchar(RdStr(p));
+                        if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
+                            Value v = Value::Float(RdF64(p)); v.type = vtype; return v;
+                        }
+                        Value v = Value::Integer(RdI64(p)); v.type = vtype; return v;
+                    };
+
                     if (pi.type == PartitionType::RANGE) {
                         uint32_t def_count = RdU32(p);
                         pi.defs.resize(def_count);
                         for (uint32_t di = 0; di < def_count; ++di) {
-                            bool is_null = RdU8(p) != 0;
-                            if (!is_null) {
-                                TypeId vtype = (TypeId)RdU8(p);
-                                if (vtype == TypeId::VARCHAR) {
-                                    pi.defs[di].upper_bound = Value::Varchar(RdStr(p));
-                                } else if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
-                                    pi.defs[di].upper_bound = Value::Float(RdF64(p));
-                                    pi.defs[di].upper_bound.type = vtype;
-                                } else {
-                                    pi.defs[di].upper_bound = Value::Integer(RdI64(p));
-                                    pi.defs[di].upper_bound.type = vtype;
-                                }
-                            }
+                            uint32_t nub = RdU32(p);
+                            for (uint32_t k = 0; k < nub; ++k)
+                                pi.defs[di].upper_bounds.push_back(RdVal());
                         }
                     } else if (pi.type == PartitionType::LIST) {
                         uint32_t def_count = RdU32(p);
                         pi.defs.resize(def_count);
                         for (uint32_t di = 0; di < def_count; ++di) {
-                            uint32_t val_count = RdU32(p);
-                            pi.defs[di].list_values.reserve(val_count);
-                            for (uint32_t vi = 0; vi < val_count; ++vi) {
-                                TypeId vtype = (TypeId)RdU8(p);
-                                Value v;
-                                if (vtype == TypeId::VARCHAR) {
-                                    v = Value::Varchar(RdStr(p));
-                                } else if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
-                                    v = Value::Float(RdF64(p));
-                                    v.type = vtype;
-                                } else {
-                                    v = Value::Integer(RdI64(p));
-                                    v.type = vtype;
-                                }
-                                pi.defs[di].list_values.push_back(std::move(v));
+                            uint32_t ntup = RdU32(p);
+                            pi.defs[di].list_values.reserve(ntup);
+                            for (uint32_t j = 0; j < ntup; ++j) {
+                                uint32_t ncols = RdU32(p);
+                                std::vector<Value> tuple;
+                                for (uint32_t k = 0; k < ncols; ++k)
+                                    tuple.push_back(RdVal());
+                                pi.defs[di].list_values.push_back(std::move(tuple));
                             }
                         }
                     }
@@ -304,25 +300,28 @@ void Database::ReplayWAL() {
                             ue.inserted_rows = chunk;
                             tx->undo_buffer.PushInsert(std::move(ue));
                         } else {
-                            // Route rows by partition (same as physical_insert path).
-                            int pk_chunk_idx = pi.partition_col_idx; // in chunk = table col idx
+                            // Route rows by partition using all partition key columns.
+                            const size_t nkeys = pi.partition_col_idxs.size();
                             std::unordered_map<uint32_t, std::vector<uint32_t>> by_part;
                             for (uint32_t r = 0; r < (uint32_t)chunk.count; ++r) {
-                                const auto& pk_vec = chunk.columns[pk_chunk_idx];
-                                Value key;
-                                if (!pk_vec.IsNull(r)) {
-                                    TypeId t = pk_vec.type;
+                                // Stack-allocate key values (no heap alloc).
+                                Value keys[8];
+                                size_t used = std::min(nkeys, size_t(8));
+                                for (size_t k = 0; k < used; ++k) {
+                                    int col_idx = pi.partition_col_idxs[k];
+                                    const auto& vec = chunk.columns[col_idx];
+                                    TypeId t = vec.type;
                                     if (t == TypeId::FLOAT32 || t == TypeId::FLOAT64) {
-                                        key = Value::Float(pk_vec.float_data[r]);
-                                        key.type = t;
+                                        keys[k] = Value::Float(vec.float_data[r]);
+                                        keys[k].type = t;
                                     } else if (t == TypeId::VARCHAR) {
-                                        key = Value::Varchar(pk_vec.str_data[r]);
+                                        keys[k] = Value::Varchar(vec.str_data[r]);
                                     } else {
-                                        key = Value::Integer(pk_vec.int_data[r]);
-                                        key.type = t;
+                                        keys[k] = Value::Integer(vec.int_data[r]);
+                                        keys[k].type = t;
                                     }
                                 }
-                                by_part[pi.RouteRow(key)].push_back(r);
+                                by_part[pi.RouteRow(keys, used)].push_back(r);
                             }
                             for (auto& [pid, idxs] : by_part) {
                                 DataChunk slice;
@@ -457,6 +456,85 @@ void Database::ReplayWAL() {
                     txn_manager_->Commit(tx);
                 } catch (...) {
                     txn_manager_->Rollback(tx);
+                }
+                break;
+            }
+
+            case WALEntryType::WAL_ALTER_TABLE: {
+                std::string schema_name = RdStr(p);
+                std::string table_name  = RdStr(p);
+                // Read new partition_info (same format as WriteAlterTable).
+                PartitionInfo pi;
+                pi.type = (PartitionType)RdU8(p);
+                if (pi.IsPartitioned()) {
+                    uint32_t nkeys = RdU32(p);
+                    for (uint32_t k = 0; k < nkeys; ++k) pi.partition_cols.push_back(RdStr(p));
+                    pi.num_partitions = RdU32(p);
+                    // Resolve indices from the existing table entry.
+                    auto tx_tmp = txn_manager_->BeginTransaction(true);
+                    auto* tbl = catalog_->GetTable(schema_name, table_name, *tx_tmp);
+                    txn_manager_->Rollback(tx_tmp);
+                    if (tbl) {
+                        for (const auto& pcol : pi.partition_cols) {
+                            for (int ci = 0; ci < (int)tbl->columns.size(); ++ci) {
+                                if (tbl->columns[ci].name == pcol) {
+                                    pi.partition_col_idxs.push_back(ci); break;
+                                }
+                            }
+                        }
+                    }
+
+                    auto RdVal = [&]() -> Value {
+                        TypeId vtype = (TypeId)RdU8(p);
+                        if (vtype == TypeId::VARCHAR) return Value::Varchar(RdStr(p));
+                        if (vtype == TypeId::FLOAT32 || vtype == TypeId::FLOAT64) {
+                            Value v = Value::Float(RdF64(p)); v.type = vtype; return v;
+                        }
+                        Value v = Value::Integer(RdI64(p)); v.type = vtype; return v;
+                    };
+
+                    if (pi.type == PartitionType::RANGE) {
+                        uint32_t def_count = RdU32(p);
+                        pi.defs.resize(def_count);
+                        for (uint32_t di = 0; di < def_count; ++di) {
+                            uint32_t nub = RdU32(p);
+                            for (uint32_t k = 0; k < nub; ++k)
+                                pi.defs[di].upper_bounds.push_back(RdVal());
+                        }
+                    } else if (pi.type == PartitionType::LIST) {
+                        uint32_t def_count = RdU32(p);
+                        pi.defs.resize(def_count);
+                        for (uint32_t di = 0; di < def_count; ++di) {
+                            uint32_t ntup = RdU32(p);
+                            pi.defs[di].list_values.reserve(ntup);
+                            for (uint32_t j = 0; j < ntup; ++j) {
+                                uint32_t ncols = RdU32(p);
+                                std::vector<Value> tuple;
+                                for (uint32_t k = 0; k < ncols; ++k)
+                                    tuple.push_back(RdVal());
+                                pi.defs[di].list_values.push_back(std::move(tuple));
+                            }
+                        }
+                    }
+                }
+                // Read rg_indices.
+                uint32_t part_count = RdU32(p);
+                std::vector<std::vector<size_t>> rg_indices(part_count);
+                for (uint32_t i = 0; i < part_count; ++i) {
+                    uint32_t rg_count = RdU32(p);
+                    rg_indices[i].reserve(rg_count);
+                    for (uint32_t j = 0; j < rg_count; ++j)
+                        rg_indices[i].push_back(static_cast<size_t>(RdU64(p)));
+                }
+                // Apply: restore partition state using system tx.
+                {
+                    auto tx = txn_manager_->BeginTransaction(true);
+                    try {
+                        catalog_->RestorePartitionState(schema_name, table_name, pi, rg_indices, *tx);
+                        txn_manager_->Commit(tx);
+                    } catch (...) {
+                        txn_manager_->Rollback(tx);
+                    }
                 }
                 break;
             }

@@ -36,6 +36,24 @@ public:
     void DropTable(const std::string& schema, const std::string& name,
                    const Transaction& tx);
 
+    // ALTER TABLE DROP/ADD PARTITION.
+    // Returns old state in *_out for undo. Sets new state directly on the entry.
+    void DropPartition(const std::string& schema, const std::string& name,
+                       uint32_t partition_idx, const Transaction& tx,
+                       PartitionInfo& old_pi_out,
+                       std::vector<std::vector<size_t>>& old_rg_out);
+    void AddPartition  (const std::string& schema, const std::string& name,
+                        const std::vector<Value>& new_bound,          // RANGE: one per key col
+                        const std::vector<std::vector<Value>>& new_values, // LIST: tuples
+                        const Transaction& tx,
+                        PartitionInfo& old_pi_out,
+                        std::vector<std::vector<size_t>>& old_rg_out);
+    // Restore partition state directly (used for rollback and WAL replay).
+    void RestorePartitionState(const std::string& schema, const std::string& name,
+                                const PartitionInfo& pi,
+                                const std::vector<std::vector<size_t>>& rg_indices,
+                                const Transaction& tx);
+
     // Flush all committed row groups' pending data to compressed segments.
     // Must be called before Serialize() to ensure pending rows are persisted.
     void FlushAllRowGroups();

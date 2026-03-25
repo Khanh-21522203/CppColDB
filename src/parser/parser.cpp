@@ -127,6 +127,7 @@ std::unique_ptr<ParsedStatement> Parser::ParseStatement() {
         if (tok.value == "DELETE")   return ParseDelete();
         if (tok.value == "CREATE")   return ParseCreateTable();
         if (tok.value == "DROP")     return ParseDropTable();
+        if (tok.value == "ALTER")    return ParseAlterTable();
         if (tok.value == "BEGIN")    return ParseTransaction(ParsedStatement::Type::BEGIN);
         if (tok.value == "COMMIT")   return ParseTransaction(ParsedStatement::Type::COMMIT);
         if (tok.value == "ROLLBACK") return ParseTransaction(ParsedStatement::Type::ROLLBACK);
@@ -219,6 +220,12 @@ std::unique_ptr<InsertStatement> Parser::ParseInsert() {
         while (Match(TokenType::PUNCTUATION, ","))
             stmt->column_names.push_back(Expect(TokenType::IDENTIFIER).value);
         Expect(TokenType::PUNCTUATION, ")");
+    }
+
+    if (Check(TokenType::KEYWORD, "SELECT")) {
+        // INSERT ... SELECT
+        stmt->select_stmt = ParseSelect();
+        return stmt;
     }
 
     Expect(TokenType::KEYWORD, "VALUES");
@@ -336,46 +343,66 @@ std::unique_ptr<CreateTableStatement> Parser::ParseCreateTable() {
     if (Match(TokenType::KEYWORD, "PARTITION")) {
         Expect(TokenType::KEYWORD, "BY");
 
+        // Helper: parse comma-separated column names inside parentheses.
+        auto ParseColNames = [&](std::vector<std::string>& cols) {
+            Expect(TokenType::PUNCTUATION, "(");
+            cols.push_back(Expect(TokenType::IDENTIFIER).value);
+            while (Match(TokenType::PUNCTUATION, ","))
+                cols.push_back(Expect(TokenType::IDENTIFIER).value);
+            Expect(TokenType::PUNCTUATION, ")");
+        };
+
+        // Helper: parse one bound tuple.
+        // If next token is '(', parse as tuple (v1, v2, ...); else parse a single value.
+        auto ParseBoundTuple = [&]() -> std::vector<std::unique_ptr<Expr>> {
+            std::vector<std::unique_ptr<Expr>> tuple;
+            const Token& nx = Peek();
+            if (nx.type == TokenType::PUNCTUATION && nx.value == "(") {
+                Expect(TokenType::PUNCTUATION, "(");
+                tuple.push_back(ParseExpr());
+                while (Match(TokenType::PUNCTUATION, ","))
+                    tuple.push_back(ParseExpr());
+                Expect(TokenType::PUNCTUATION, ")");
+            } else {
+                tuple.push_back(ParseExpr());
+            }
+            return tuple;
+        };
+
         if (Match(TokenType::KEYWORD, "RANGE")) {
             stmt->partition_kind = CreateTableStatement::PartitionKind::RANGE;
-            Expect(TokenType::PUNCTUATION, "(");
-            stmt->partition_col = Expect(TokenType::IDENTIFIER).value;
-            Expect(TokenType::PUNCTUATION, ")");
-            // VALUES (b1, b2, ...)
+            ParseColNames(stmt->partition_cols);
+            // VALUES ((b1a, b1b), (b2a, b2b), ...) or VALUES (b1, b2, ...)
             Expect(TokenType::KEYWORD, "VALUES");
             Expect(TokenType::PUNCTUATION, "(");
-            stmt->range_bounds.push_back(ParseExpr());
+            stmt->range_bounds.push_back(ParseBoundTuple());
             while (Match(TokenType::PUNCTUATION, ","))
-                stmt->range_bounds.push_back(ParseExpr());
+                stmt->range_bounds.push_back(ParseBoundTuple());
             Expect(TokenType::PUNCTUATION, ")");
 
         } else if (Match(TokenType::KEYWORD, "HASH")) {
             stmt->partition_kind = CreateTableStatement::PartitionKind::HASH;
-            Expect(TokenType::PUNCTUATION, "(");
-            stmt->partition_col = Expect(TokenType::IDENTIFIER).value;
-            Expect(TokenType::PUNCTUATION, ")");
+            ParseColNames(stmt->partition_cols);
             Expect(TokenType::KEYWORD, "PARTITIONS");
             Token cnt = Expect(TokenType::INTEGER_LIT);
             stmt->hash_partition_count = static_cast<uint32_t>(std::stoll(cnt.value));
 
         } else if (Match(TokenType::KEYWORD, "LIST")) {
             stmt->partition_kind = CreateTableStatement::PartitionKind::LIST;
-            Expect(TokenType::PUNCTUATION, "(");
-            stmt->partition_col = Expect(TokenType::IDENTIFIER).value;
-            Expect(TokenType::PUNCTUATION, ")");
-            // PARTITION name VALUES IN (v1, v2, ...) [, PARTITION ...]
+            ParseColNames(stmt->partition_cols);
+            // PARTITION name VALUES IN ((t1a, t1b), ...) [, PARTITION ...]
             do {
                 Expect(TokenType::KEYWORD, "PARTITION");
                 Expect(TokenType::IDENTIFIER); // partition name (ignored)
                 Expect(TokenType::KEYWORD, "VALUES");
                 Expect(TokenType::KEYWORD, "IN");
                 Expect(TokenType::PUNCTUATION, "(");
-                std::vector<std::unique_ptr<Expr>> vals;
-                vals.push_back(ParseExpr());
+                std::vector<std::vector<std::unique_ptr<Expr>>> part_tuples;
+                part_tuples.push_back(ParseBoundTuple());
                 while (Match(TokenType::PUNCTUATION, ","))
-                    vals.push_back(ParseExpr());
+                    part_tuples.push_back(ParseBoundTuple());
                 Expect(TokenType::PUNCTUATION, ")");
-                stmt->list_values.push_back(std::move(vals));
+                stmt->list_values.push_back(std::move(part_tuples));
             } while (Match(TokenType::PUNCTUATION, ","));
         }
     }
@@ -398,6 +425,75 @@ std::unique_ptr<DropTableStatement> Parser::ParseDropTable() {
     }
 
     ParseQualifiedName(stmt->schema_name, stmt->table_name);
+    return stmt;
+}
+
+// ---------------------------------------------------------------------------
+// ALTER TABLE ... DROP/ADD PARTITION
+//   ALTER TABLE t DROP PARTITION <idx>;
+//   ALTER TABLE t ADD PARTITION VALUES LESS THAN (<bound>);    -- RANGE
+//   ALTER TABLE t ADD PARTITION VALUES IN (<v1>, <v2>, ...);   -- LIST
+// ---------------------------------------------------------------------------
+
+std::unique_ptr<AlterTableStatement> Parser::ParseAlterTable() {
+    Expect(TokenType::KEYWORD, "ALTER");
+    Expect(TokenType::KEYWORD, "TABLE");
+    auto stmt = std::make_unique<AlterTableStatement>();
+    ParseQualifiedName(stmt->schema_name, stmt->table_name);
+
+    if (Match(TokenType::KEYWORD, "DROP")) {
+        Expect(TokenType::KEYWORD, "PARTITION");
+        stmt->kind = AlterTableStatement::AlterKind::DROP_PARTITION;
+        auto tok = Expect(TokenType::INTEGER_LIT);
+        stmt->partition_idx = static_cast<uint32_t>(std::stoul(tok.value));
+    } else if (Match(TokenType::KEYWORD, "ADD")) {
+        Expect(TokenType::KEYWORD, "PARTITION");
+        stmt->kind = AlterTableStatement::AlterKind::ADD_PARTITION;
+        // Determine type from VALUES keyword context.
+        Expect(TokenType::KEYWORD, "VALUES");
+        if (Match(TokenType::KEYWORD, "LESS")) {
+            // RANGE: VALUES LESS THAN (<v>) or VALUES LESS THAN ((v1, v2, ...))
+            Expect(TokenType::KEYWORD, "THAN");
+            Expect(TokenType::PUNCTUATION, "(");
+            const Token& nx = Peek();
+            if (nx.type == TokenType::PUNCTUATION && nx.value == "(") {
+                // composite key tuple
+                Expect(TokenType::PUNCTUATION, "(");
+                stmt->new_range_bound.push_back(ParseExpr());
+                while (Match(TokenType::PUNCTUATION, ","))
+                    stmt->new_range_bound.push_back(ParseExpr());
+                Expect(TokenType::PUNCTUATION, ")");
+            } else {
+                stmt->new_range_bound.push_back(ParseExpr());
+            }
+            Expect(TokenType::PUNCTUATION, ")");
+        } else {
+            // LIST: VALUES IN ((t1a, t1b), ...) or VALUES IN (v1, v2, ...)
+            Expect(TokenType::KEYWORD, "IN");
+            Expect(TokenType::PUNCTUATION, "(");
+            // Parse tuples or plain values
+            auto parseTuple = [&]() -> std::vector<std::unique_ptr<Expr>> {
+                std::vector<std::unique_ptr<Expr>> t;
+                const Token& n = Peek();
+                if (n.type == TokenType::PUNCTUATION && n.value == "(") {
+                    Expect(TokenType::PUNCTUATION, "(");
+                    t.push_back(ParseExpr());
+                    while (Match(TokenType::PUNCTUATION, ","))
+                        t.push_back(ParseExpr());
+                    Expect(TokenType::PUNCTUATION, ")");
+                } else {
+                    t.push_back(ParseExpr());
+                }
+                return t;
+            };
+            stmt->new_list_values.push_back(parseTuple());
+            while (Match(TokenType::PUNCTUATION, ","))
+                stmt->new_list_values.push_back(parseTuple());
+            Expect(TokenType::PUNCTUATION, ")");
+        }
+    } else {
+        throw ParseError("ALTER TABLE: expected DROP or ADD");
+    }
     return stmt;
 }
 

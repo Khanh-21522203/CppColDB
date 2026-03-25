@@ -67,6 +67,8 @@ std::unique_ptr<LogicalPlan> Binder::Bind(const ParsedStatement& stmt) {
             return BindCreateTable(static_cast<const CreateTableStatement&>(stmt));
         case ParsedStatement::Type::DROP_TABLE:
             return BindDropTable(static_cast<const DropTableStatement&>(stmt));
+        case ParsedStatement::Type::ALTER_TABLE:
+            return BindAlterTable(static_cast<const AlterTableStatement&>(stmt));
         default:
             throw BindError("Binder: unsupported statement type");
     }
@@ -100,8 +102,9 @@ std::unique_ptr<LogicalPlan> Binder::BindSelect(const SelectStatement& stmt) {
 
     // Step 3: build LogicalGet
     auto get = std::make_unique<LogicalGet>();
-    get->schema_name = schema_name;
-    get->table_name  = stmt.from_table;
+    get->schema_name    = schema_name;
+    get->table_name     = stmt.from_table;
+    get->partition_info = table->partition_info;
     for (const auto& rg : table->row_groups) {
         get->catalog_row_count += rg->RowCount();
     }
@@ -277,6 +280,20 @@ std::unique_ptr<LogicalPlan> Binder::BindInsert(const InsertStatement& stmt) {
         }
     }
 
+    // --- INSERT ... SELECT path ---
+    if (stmt.select_stmt) {
+        auto select_plan = BindSelect(*stmt.select_stmt);
+        if (select_plan->output_types.size() != column_ids.size())
+            throw BindError("INSERT...SELECT: column count mismatch");
+        auto insert = std::make_unique<LogicalInsert>();
+        insert->schema_name        = schema_name;
+        insert->table_name         = stmt.table_name;
+        insert->column_ids         = std::move(column_ids);
+        insert->has_select_source  = true;
+        insert->children.push_back(std::move(select_plan));
+        return insert;
+    }
+
     // Build a DataChunk from the literal VALUES rows.
     BindContext empty_ctx; // no columns — values must be literals
 
@@ -433,8 +450,9 @@ std::unique_ptr<LogicalPlan> Binder::BindUpdate(const UpdateStatement& stmt) {
     }
 
     auto get = std::make_unique<LogicalGet>();
-    get->schema_name = schema_name;
-    get->table_name  = stmt.table_name;
+    get->schema_name    = schema_name;
+    get->table_name     = stmt.table_name;
+    get->partition_info = table->partition_info;
     get->column_ids.assign(required_cols.begin(), required_cols.end());
     get->output_types.reserve(get->column_ids.size());
     get->output_names.reserve(get->column_ids.size());
@@ -558,56 +576,67 @@ std::unique_ptr<LogicalPlan> Binder::BindCreateTable(const CreateTableStatement&
     // Build PartitionInfo if a partition clause was specified.
     PartitionInfo pi;
     if (stmt.partition_kind != CreateTableStatement::PartitionKind::NONE) {
-        // Resolve partition column.
-        int pk_idx = -1;
-        for (int i = 0; i < static_cast<int>(col_defs.size()); ++i) {
-            if (col_defs[i].name == stmt.partition_col) { pk_idx = i; break; }
+        if (stmt.partition_cols.empty())
+            throw BindError("partition clause has no key columns");
+
+        // Resolve all partition key columns.
+        for (const auto& pcol : stmt.partition_cols) {
+            int pk_idx = -1;
+            for (int i = 0; i < static_cast<int>(col_defs.size()); ++i) {
+                if (col_defs[i].name == pcol) { pk_idx = i; break; }
+            }
+            if (pk_idx < 0)
+                throw BindError("partition column not found: " + pcol);
+            pi.partition_cols.push_back(pcol);
+            pi.partition_col_idxs.push_back(pk_idx);
         }
-        if (pk_idx < 0)
-            throw BindError("partition column not found: " + stmt.partition_col);
 
-        pi.partition_col     = stmt.partition_col;
-        pi.partition_col_idx = pk_idx;
-        TypeId pk_type       = col_defs[pk_idx].type;
-
-        // Helper: convert a parsed literal Expr to a Value.
-        auto ExprToValue = [&](const Expr& e) -> Value {
+        // Helper: convert a parsed literal Expr to a typed Value.
+        // col_idx_in_partition is the k-th partition key column (to pick the right type).
+        auto ExprToValue = [&](const Expr& e, size_t k) -> Value {
+            TypeId pk_type = col_defs[static_cast<size_t>(pi.partition_col_idxs[k])].type;
             if (e.kind == Expr::Kind::INTEGER_LIT) {
-                int64_t v = static_cast<const IntegerLitExpr&>(e).value;
-                Value val = Value::Integer(v);
-                val.type  = pk_type;
-                return val;
+                Value val = Value::Integer(static_cast<const IntegerLitExpr&>(e).value);
+                val.type  = pk_type; return val;
             }
             if (e.kind == Expr::Kind::FLOAT_LIT) {
-                double v  = static_cast<const FloatLitExpr&>(e).value;
-                Value val = Value::Float(v);
-                val.type  = pk_type;
-                return val;
+                Value val = Value::Float(static_cast<const FloatLitExpr&>(e).value);
+                val.type  = pk_type; return val;
             }
-            if (e.kind == Expr::Kind::STRING_LIT) {
+            if (e.kind == Expr::Kind::STRING_LIT)
                 return Value::Varchar(static_cast<const StringLitExpr&>(e).value);
-            }
             throw BindError("partition bound must be a literal constant");
         };
+
+        const size_t nkeys = pi.partition_col_idxs.size();
 
         if (stmt.partition_kind == CreateTableStatement::PartitionKind::RANGE) {
             if (stmt.range_bounds.empty())
                 throw BindError("RANGE partitioning requires at least one bound");
-            // N-1 bounds → N partitions.
-            // defs[0].upper_bound = bounds[0]; defs[N-1].upper_bound = null (catch-all).
+            // N-1 bounds → N partitions. Last def has empty upper_bounds (open upper bound).
             uint32_t n = static_cast<uint32_t>(stmt.range_bounds.size()) + 1;
             pi.type           = PartitionType::RANGE;
             pi.num_partitions = n;
             pi.defs.resize(n);
             for (uint32_t i = 0; i < n - 1; ++i) {
-                pi.defs[i].upper_bound = ExprToValue(*stmt.range_bounds[i]);
+                const auto& bound_exprs = stmt.range_bounds[i];
+                for (size_t k = 0; k < std::min(nkeys, bound_exprs.size()); ++k)
+                    pi.defs[i].upper_bounds.push_back(ExprToValue(*bound_exprs[k], k));
             }
-            // Validate bounds are strictly increasing.
+            // Validate bounds are strictly increasing (lexicographic comparison).
+            auto LexLess = [](const std::vector<Value>& a, const std::vector<Value>& b) {
+                size_t n = std::min(a.size(), b.size());
+                for (size_t k = 0; k < n; ++k) {
+                    if (a[k] < b[k]) return true;
+                    if (b[k] < a[k]) return false;
+                }
+                return a.size() < b.size(); // shorter prefix < longer
+            };
             for (uint32_t i = 1; i < n - 1; ++i) {
-                if (!(pi.defs[i - 1].upper_bound < pi.defs[i].upper_bound))
+                if (!LexLess(pi.defs[i-1].upper_bounds, pi.defs[i].upper_bounds))
                     throw BindError("RANGE partition bounds must be strictly increasing");
             }
-            // Last partition has open upper bound (IsNull = true by default).
+            // Last partition: upper_bounds stays empty (open upper bound).
 
         } else if (stmt.partition_kind == CreateTableStatement::PartitionKind::HASH) {
             if (stmt.hash_partition_count < 1)
@@ -619,13 +648,16 @@ std::unique_ptr<LogicalPlan> Binder::BindCreateTable(const CreateTableStatement&
         } else if (stmt.partition_kind == CreateTableStatement::PartitionKind::LIST) {
             if (stmt.list_values.empty())
                 throw BindError("LIST partitioning requires at least one partition");
-            uint32_t n        = static_cast<uint32_t>(stmt.list_values.size());
+            uint32_t n = static_cast<uint32_t>(stmt.list_values.size());
             pi.type           = PartitionType::LIST;
             pi.num_partitions = n;
             pi.defs.resize(n);
             for (uint32_t i = 0; i < n; ++i) {
-                for (const auto& ve : stmt.list_values[i]) {
-                    pi.defs[i].list_values.push_back(ExprToValue(*ve));
+                for (const auto& tuple_exprs : stmt.list_values[i]) {
+                    std::vector<Value> tuple;
+                    for (size_t k = 0; k < std::min(nkeys, tuple_exprs.size()); ++k)
+                        tuple.push_back(ExprToValue(*tuple_exprs[k], k));
+                    pi.defs[i].list_values.push_back(std::move(tuple));
                 }
             }
         }
@@ -653,6 +685,72 @@ std::unique_ptr<LogicalPlan> Binder::BindDropTable(const DropTableStatement& stm
     node->schema_name = schema_name;
     node->table_name  = stmt.table_name;
     node->if_exists   = stmt.if_exists;
+    return node;
+}
+
+// ---------------------------------------------------------------------------
+// ALTER TABLE
+// ---------------------------------------------------------------------------
+
+std::unique_ptr<LogicalPlan> Binder::BindAlterTable(const AlterTableStatement& stmt) {
+    const std::string schema_name = stmt.schema_name.empty()
+                                  ? Catalog::DEFAULT_SCHEMA
+                                  : stmt.schema_name;
+
+    auto* table = catalog_.GetTable(schema_name, stmt.table_name, tx_);
+    if (!table) throw BindError("ALTER TABLE: table not found: " + stmt.table_name);
+    if (!table->partition_info.IsPartitioned())
+        throw BindError("ALTER TABLE: table is not partitioned: " + stmt.table_name);
+
+    auto node = std::make_unique<LogicalAlterTable>();
+    node->schema_name   = schema_name;
+    node->table_name    = stmt.table_name;
+
+    if (stmt.kind == AlterTableStatement::AlterKind::DROP_PARTITION) {
+        if (stmt.partition_idx >= table->partition_info.num_partitions)
+            throw BindError("ALTER TABLE: partition index out of range");
+        node->kind          = LogicalAlterTable::AlterKind::DROP_PARTITION;
+        node->partition_idx = stmt.partition_idx;
+    } else {
+        // ADD PARTITION
+        node->kind = LogicalAlterTable::AlterKind::ADD_PARTITION;
+        const auto& pi = table->partition_info;
+        if (pi.partition_col_idxs.empty())
+            throw BindError("ALTER TABLE: partition has no key columns");
+
+        auto ExprToValue = [&](const Expr& e, size_t k) -> Value {
+            TypeId pk_type = table->columns[static_cast<size_t>(pi.partition_col_idxs[k])].type;
+            if (e.kind == Expr::Kind::INTEGER_LIT) {
+                Value val = Value::Integer(static_cast<const IntegerLitExpr&>(e).value);
+                val.type = pk_type; return val;
+            }
+            if (e.kind == Expr::Kind::FLOAT_LIT) {
+                Value val = Value::Float(static_cast<const FloatLitExpr&>(e).value);
+                val.type = pk_type; return val;
+            }
+            if (e.kind == Expr::Kind::STRING_LIT)
+                return Value::Varchar(static_cast<const StringLitExpr&>(e).value);
+            throw BindError("ALTER TABLE: partition bound must be a literal");
+        };
+
+        if (pi.type == PartitionType::RANGE) {
+            if (stmt.new_range_bound.empty())
+                throw BindError("ALTER TABLE ADD PARTITION: missing bound for RANGE");
+            for (size_t k = 0; k < std::min(pi.partition_col_idxs.size(), stmt.new_range_bound.size()); ++k)
+                node->new_bound.push_back(ExprToValue(*stmt.new_range_bound[k], k));
+        } else if (pi.type == PartitionType::LIST) {
+            if (stmt.new_list_values.empty())
+                throw BindError("ALTER TABLE ADD PARTITION: missing values for LIST");
+            for (const auto& tuple_exprs : stmt.new_list_values) {
+                std::vector<Value> tuple;
+                for (size_t k = 0; k < std::min(pi.partition_col_idxs.size(), tuple_exprs.size()); ++k)
+                    tuple.push_back(ExprToValue(*tuple_exprs[k], k));
+                node->new_values.push_back(std::move(tuple));
+            }
+        } else {
+            throw BindError("ALTER TABLE ADD PARTITION: HASH partitions have fixed count");
+        }
+    }
     return node;
 }
 
