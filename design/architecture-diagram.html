@@ -1,0 +1,767 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CppColDB — Architecture &amp; Flows</title>
+<script>
+  (function () {
+    var saved = localStorage.getItem('cppcoldb-theme');
+    var dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.classList.toggle('dark', dark);
+  })();
+</script>
+<style>
+  :root {
+    --bg: #FAF9F5; --surface: #FFFFFF; --surface2: #F0EEE6;
+    --ink: #14181D; --body: #3D4147; --muted: #86898F;
+    --line: #D3D2CB; --line-soft: #E7E5DC;
+    --blue: #3E6FA8; --blue-soft: rgba(62,111,168,0.10);
+    --teal: #3F8C82; --teal-soft: rgba(63,140,130,0.12);
+    --amber: #B8873B; --amber-soft: rgba(184,135,59,0.14);
+    --rose: #B5533C; --rose-soft: rgba(181,83,60,0.14);
+    --zone: rgba(20,24,29,0.03); --zone-line: #CFCEC6;
+    --serif: ui-serif, Georgia, "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  html.dark {
+    --bg: #14171B; --surface: #1D2125; --surface2: #262A2F;
+    --ink: #F3F1EA; --body: #C9CBC6; --muted: #8B8F94;
+    --line: #3A3E43; --line-soft: #2A2E33;
+    --blue: #7CA6DB; --blue-soft: rgba(124,166,219,0.14);
+    --teal: #74C2B4; --teal-soft: rgba(116,194,180,0.14);
+    --amber: #E0B168; --amber-soft: rgba(224,177,104,0.16);
+    --rose: #E28870; --rose-soft: rgba(226,136,112,0.16);
+    --zone: rgba(243,241,234,0.025); --zone-line: #3A3E43;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--body); font-family: var(--sans);
+    -webkit-font-smoothing: antialiased; display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  .bar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--line-soft); flex: none;
+  }
+  .bar h1 { font-family: var(--serif); font-weight: 500; font-size: 18px; color: var(--ink); letter-spacing: -0.01em; }
+  .bar .sub { font-family: var(--mono); font-size: 10px; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
+  .spacer { flex: 1; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.03em;
+    padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px;
+    background: transparent; color: var(--muted); cursor: pointer; transition: all .15s ease;
+    white-space: nowrap;
+  }
+  .chip:hover { color: var(--ink); border-color: var(--muted); }
+  .chip.on { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+  .chip.warn.on { background: var(--rose); border-color: var(--rose); color: #fff; }
+  .divider { width: 1px; height: 20px; background: var(--line); flex: none; }
+  .iconbtn {
+    font-family: var(--mono); font-size: 13px; width: 26px; height: 26px; line-height: 1;
+    border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted);
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .iconbtn:hover { color: var(--ink); border-color: var(--muted); }
+  #themeToggle {
+    font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+    padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px;
+    background: transparent; color: var(--muted); cursor: pointer;
+  }
+  #themeToggle:hover { color: var(--ink); border-color: var(--muted); }
+
+  .stage { flex: 1; position: relative; min-height: 0; cursor: grab; }
+  .stage.dragging { cursor: grabbing; }
+  .stage svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .zone rect { fill: var(--zone); stroke: var(--zone-line); stroke-width: 1; stroke-dasharray: 5 5; rx: 14; }
+  .zone .ztitle { font-family: var(--mono); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; fill: var(--ink); font-weight: 600; }
+  .zone .zsub { font-family: var(--mono); font-size: 10px; fill: var(--muted); }
+
+  .node { cursor: pointer; }
+  .node rect.box { fill: var(--surface); stroke: var(--line); stroke-width: 1.4; rx: 9; transition: stroke .15s ease, filter .15s ease; }
+  .node:hover rect.box { stroke: var(--muted); }
+  .node.sel rect.box { stroke: var(--blue) !important; stroke-width: 2.2; }
+  .node .t  { font-family: var(--sans); font-size: 13px; font-weight: 700; fill: var(--ink); pointer-events: none; }
+  .node .k  { font-family: var(--mono); font-size: 8.6px; letter-spacing: 0.07em; text-transform: uppercase; fill: var(--muted); pointer-events: none; }
+  .node .m  { font-family: var(--mono); font-size: 9.6px; fill: var(--body); pointer-events: none; }
+  .node.role-source rect.box { border-left: none; }
+  .node.role-source .accent { fill: var(--blue); }
+  .node.role-sink .accent { fill: var(--rose); }
+  .node.role-operator .accent { fill: var(--teal); }
+  .node.role-store .accent { fill: var(--amber); }
+  .node.role-plain .accent { fill: var(--muted); }
+  .node .accent { }
+  .riskbadge { display: none; }
+  svg.show-risk .node[data-risk="1"] rect.box { stroke: var(--rose); stroke-dasharray: 4 3; }
+  svg.show-risk .node[data-risk="1"] .riskbadge { display: block; }
+  .riskbadge circle { fill: var(--rose); }
+  .riskbadge text { fill: #fff; font-family: var(--mono); font-weight: 700; font-size: 11px; }
+
+  .edge { stroke: var(--muted); stroke-width: 1.3; fill: none; marker-end: url(#a-mut); opacity: 0.55; transition: opacity .2s ease, stroke .2s ease; }
+  .edge.dash { stroke-dasharray: 5 4; }
+  .elbl { font-family: var(--mono); font-size: 9px; fill: var(--muted); opacity: 0; transition: opacity .2s ease; }
+
+  svg.flowing .edge { opacity: 0.08; }
+  svg.flowing .node { opacity: 0.28; }
+  svg.flowing .zone { opacity: 0.4; }
+  svg.flowing .edge.lit {
+    opacity: 1; stroke: var(--blue); marker-end: url(#a-blue);
+    stroke-dasharray: 7 5; stroke-width: 2; animation: march 0.9s linear infinite;
+  }
+  svg.flowing .elbl.lit { opacity: 1; fill: var(--blue); font-weight: 600; }
+  svg.flowing .node.lit { opacity: 1; }
+  svg.flowing .node.lit rect.box { stroke: var(--blue); stroke-width: 2; }
+  @keyframes march { to { stroke-dashoffset: -12; } }
+  @media (prefers-reduced-motion: reduce) { svg.flowing .edge.lit { animation: none; } }
+
+  .card {
+    position: absolute; max-width: 380px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; box-shadow: 0 8px 28px rgba(0,0,0,0.12); z-index: 5;
+  }
+  #detail { right: 16px; bottom: 16px; width: 360px; max-height: 46vh; overflow-y: auto; }
+  #detail .kick { font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+  #detail h3 { font-family: var(--serif); font-weight: 600; font-size: 17px; color: var(--ink); margin-bottom: 6px; }
+  #detail .file { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-bottom: 8px; word-break: break-all; }
+  #detail ul { margin: 0 0 0 4px; padding: 0; list-style: none; }
+  #detail li { font-size: 12px; line-height: 1.55; padding: 2px 0 2px 12px; position: relative; }
+  #detail li::before { content: "–"; position: absolute; left: 0; color: var(--muted); }
+  #detail .gotcha { margin-top: 10px; padding: 8px 10px; border-radius: 8px; background: var(--rose-soft); border: 1px solid var(--rose); font-size: 11.5px; line-height: 1.5; color: var(--ink); }
+  #detail .gotcha b { color: var(--rose); }
+  #flowcap { left: 16px; bottom: 16px; max-width: 440px; display: none; }
+  #flowcap.show { display: block; }
+  #flowcap .fname { font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--blue); margin-bottom: 6px; font-weight: 700; }
+  #flowcap ol { margin-left: 16px; }
+  #flowcap li { font-size: 12px; line-height: 1.5; }
+  #legend { left: 16px; top: 16px; padding: 10px 12px; font-family: var(--mono); font-size: 10px; color: var(--muted); display: flex; flex-direction: column; gap: 5px; }
+  #legend .row { display: flex; align-items: center; gap: 7px; }
+  #legend .sw { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+  .src { position: absolute; top: 10px; right: 16px; font-family: var(--mono); font-size: 9.5px; color: var(--muted); opacity: 0.8; z-index: 5; }
+  @media (max-width: 900px) {
+    body { overflow: auto; }
+    .stage { min-height: 70vh; }
+    #detail, #flowcap, #legend { position: static; width: auto; max-width: none; margin: 10px 16px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <div>
+    <h1>CppColDB — architecture &amp; flows</h1>
+    <div class="sub">embedded C++20 columnar database · SQL → parse → bind → optimize → plan → execute → storage/MVCC/WAL</div>
+  </div>
+  <div class="spacer"></div>
+  <div class="chips" id="chips">
+    <button class="chip on" data-flow="all">Everything</button>
+    <button class="chip" data-flow="select">SELECT lifecycle</button>
+    <button class="chip" data-flow="write">Write + undo + WAL</button>
+    <button class="chip" data-flow="join">Hash join build/probe</button>
+    <button class="chip" data-flow="sort">Sort sink/source</button>
+    <button class="chip" data-flow="aggregate">Aggregate sink/source</button>
+    <button class="chip" data-flow="mvcc">MVCC visibility</button>
+    <button class="chip" data-flow="checkpoint">Checkpoint &amp; recovery</button>
+    <button class="chip" data-flow="partition">Partition route/prune</button>
+    <button class="chip" data-flow="profiling">Profiling &amp; benchmark</button>
+    <button class="chip" data-flow="bootstrap">Bootstrap / cold start</button>
+  </div>
+  <div class="divider"></div>
+  <button class="chip warn" id="riskChip">⚠ Known gaps</button>
+  <div class="divider"></div>
+  <button class="iconbtn" id="zoomOut" title="Zoom out">–</button>
+  <button class="iconbtn" id="zoomReset" title="Reset view">⤢</button>
+  <button class="iconbtn" id="zoomIn" title="Zoom in">+</button>
+  <button id="themeToggle">Theme</button>
+</div>
+
+<div class="stage" id="stage">
+<svg id="svg" viewBox="0 0 2680 1700" role="img" aria-label="CppColDB architecture diagram">
+  <defs>
+    <marker id="a-mut" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill: var(--muted)"/>
+    </marker>
+    <marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill: var(--blue)"/>
+    </marker>
+  </defs>
+  <g id="zonesLayer"></g>
+  <g id="nodesLayer"></g>
+  <g id="edgesLayer"></g>
+  <g id="labelsLayer"></g>
+</svg>
+
+<div class="src">design/architecture-diagram.html · sources: design/*.md + src/**</div>
+
+<div class="card" id="legend">
+  <div class="row"><span class="sw" style="background:var(--blue)"></span> SOURCE operator (produces chunks)</div>
+  <div class="row"><span class="sw" style="background:var(--teal)"></span> OPERATOR (transforms chunks)</div>
+  <div class="row"><span class="sw" style="background:var(--rose)"></span> SINK (consumes / buffers chunks)</div>
+  <div class="row"><span class="sw" style="background:var(--amber)"></span> persistent / on-disk store</div>
+  <div class="row"><span class="sw" style="background:var(--muted)"></span> plain component / manager</div>
+  <div class="row">⚠ dashed rose outline = confirmed gap (toggle top right)</div>
+</div>
+
+<div class="card" id="flowcap">
+  <div class="fname" id="f-name"></div>
+  <ol id="f-steps"></ol>
+</div>
+
+<div class="card" id="detail">
+  <div class="kick">click any box</div>
+  <h3 id="d-title">CppColDB</h3>
+  <div class="file">design/diagrams.md · 11 mermaid views distilled into this page</div>
+  <ul id="d-body">
+    <li>Every node below is drawn from the actual source tree, not just the design docs — class fields, method names and file paths are cited in each panel.</li>
+    <li>Use the chips above to animate a request path end to end; drag to pan, scroll/pinch or the +/– buttons to zoom, since this canvas is large by design.</li>
+  </ul>
+</div>
+
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// DATA
+// ---------------------------------------------------------------------------
+var ZONES = [
+  {id:'entry',    x:40,   y:64, w:280,  h:650,  t:'Entry / Client Surface',      s:'main.cpp · Database · Connection · ClientContext'},
+  {id:'frontend', x:352,  y:64, w:280,  h:540,  t:'SQL Frontend',                s:'Tokenizer → Parser → AST'},
+  {id:'planner',  x:664,  y:64, w:320,  h:910,  t:'Binder & Query Planner',      s:'semantic analysis · 4-pass optimizer · physical lowering'},
+  {id:'exec',     x:1000, y:64, w:660,  h:1330, t:'Vectorized Execution Engine', s:'pipeline DAG · SOURCE / OPERATOR / SINK operators'},
+  {id:'storage',  x:1676, y:64, w:600,  h:960,  t:'Columnar Storage Engine',     s:'catalog · row groups · compression · buffer pool'},
+  {id:'txn',      x:2296, y:64, w:328,  h:1010, t:'Transactions & Durability',   s:'MVCC · undo buffer · WAL · checkpoint/recovery'},
+  {id:'cross',    x:700,  y:1434,w:1120, h:200,  t:'Cross-Cutting',              s:'background thread pool · profiling · benchmark harness'}
+];
+
+// role: source | operator | sink | store | plain   risk: 1 flags a confirmed gap
+var NODES = [
+  {id:'repl', x:64,y:104,w:232,h:105, role:'plain', k:'ENTRY POINT', t:'main.cpp — REPL',
+    m:['reads stdin line by line','one SQL statement per line','exit / quit / \\q to stop'],
+    file:'main.cpp'},
+  {id:'database', x:64,y:231,w:232,h:135, role:'plain', k:'OWNER', t:'Database',
+    m:['owns BlockFile, BufferManager,','WAL, Catalog, TransactionManager,','CheckpointManager, TaskScheduler','DatabaseConfig: 256MiB pool,','256KiB blocks, 1 sched. thread'],
+    file:'src/main/database.hpp, .cpp'},
+  {id:'connection', x:64,y:388,w:232,h:120, role:'plain', k:'SESSION', t:'Connection',
+    m:['active_tx_ == null means','auto-commit wraps every Query','intercepts bare BEGIN / COMMIT /','ROLLBACK as raw text pre-parse'],
+    file:'src/main/connection.hpp, .cpp'},
+  {id:'clientcontext', x:64,y:530,w:232,h:150, role:'plain', k:'PER-QUERY', t:'ClientContext',
+    m:['drives Tokenize→Parse→Bind→','Optimize→Plan→Execute','brackets QueryProfiler phases:','PARSE/BIND/OPTIMIZE/PHYS_PLAN/EXEC','intercepts EXPLAIN [ANALYZE]','ahead of normal Bind dispatch'],
+    file:'src/main/client_context.hpp, .cpp'},
+
+  {id:'tokenizer', x:376,y:104,w:232,h:120, role:'plain', k:'LEXER', t:'Tokenizer', risk:1,
+    m:['single pass, ~50 keyword set','KEYWORD/IDENTIFIER/INTEGER_LIT/','FLOAT_LIT/STRING_LIT/OPERATOR','see gap: escape handling'],
+    file:'src/parser/tokenizer.hpp, .cpp',
+    gotcha:'The \'\' escape-handling branch in Tokenizer::Tokenize is unreachable code — the surrounding while-loop condition exits before the inner branch can ever see two consecutive quote characters.'},
+  {id:'parser', x:376,y:246,w:232,h:180, role:'plain', k:'RECURSIVE DESCENT', t:'Parser', risk:1,
+    m:['ParseStatement dispatches on','first keyword: SELECT/INSERT/','UPDATE/DELETE/CREATE/DROP/','ALTER/BEGIN/COMMIT/ROLLBACK/EXPLAIN','expr precedence: Or→And→Not→','Cmp→AddSub→MulDiv→Unary','see gap: outer join keywords'],
+    file:'src/parser/parser.hpp, .cpp',
+    gotcha:'LEFT/RIGHT/OUTER/CROSS are recognized keywords in the tokenizer, but the JOIN-clause loop inside Parser::ParseSelect only checks for INNER or JOIN — those outer-join forms fail to parse.'},
+  {id:'ast', x:376,y:448,w:232,h:120, role:'plain', k:'AST', t:'ParsedStatement / Expr', risk:1,
+    m:['Expr::Kind: COLUMN_REF, 4×LITERAL,','BINARY_OP, UNARY_OP, FUNCTION_CALL,','STAR','see gap: DISTINCT ignored'],
+    file:'src/parser/ast/parsed_statement.hpp',
+    gotcha:'SelectStatement.distinct is set by the parser but never read by the Binder or PhysicalPlanner — SELECT DISTINCT silently behaves like a plain SELECT.'},
+
+  {id:'bindcontext', x:688,y:104,w:272,h:120, role:'plain', k:'SCOPE', t:'BindContext',
+    m:['maps column name → ColumnBinding[]','and table alias → ColumnBinding[]','ResolveColumn throws on 0 or','more than 1 match (ambiguous ref)'],
+    file:'src/planner/bind_context.hpp, .cpp'},
+  {id:'binder', x:688,y:246,w:272,h:180, role:'plain', k:'SEMANTIC ANALYSIS', t:'Binder', risk:1,
+    m:['BindSelect / BindInsert / BindUpdate /','BindDelete / BindCreateTable / ...','equi-join keys split via','ExtractEquiJoinKeys (AND-chain walk)','UPDATE scan columns minimized via','CollectBoundColumnRefs','see gap: txn keywords unbound'],
+    file:'src/planner/binder.hpp, .cpp (~1430 lines)',
+    gotcha:'Binder::Bind has no switch case for BEGIN/COMMIT/ROLLBACK/EXPLAIN — reaching the binder with one of those statement types (e.g. EXPLAIN BEGIN) throws BindError, since Connection normally intercepts them as raw text first.'},
+  {id:'logicalplan', x:688,y:448,w:272,h:120, role:'plain', k:'IR', t:'LogicalPlan / LogicalExpr',
+    m:['GET · FILTER · PROJECTION · LIMIT ·','SORT · AGGREGATE · JOIN · INSERT ·','DELETE · UPDATE · CREATE/DROP/ALTER','CloneExpr deep-clones subtrees'],
+    file:'src/planner/logical_plan/logical_plan.hpp'},
+  {id:'optimizer', x:688,y:590,w:272,h:180, role:'plain', k:'4 FIXED-ORDER PASSES', t:'Optimizer', risk:1,
+    m:['1. Constant folding (bottom-up)','   dead-filter / empty-GET elim.','2. Predicate pushdown → pushed_filters','   stops at AGGREGATE / JOIN','3. Column pruning (top-down)','   fresh set past AGGREGATE','4. Filter merge (AND-combine)'],
+    file:'src/planner/optimizer.hpp, .cpp',
+    gotcha:'Column pruning explicitly skips JOIN nodes (comment marks it a Phase-8 scope cut) — columns flowing through a join keep their full width even when the parent never references them.'},
+  {id:'physicalplanner', x:688,y:792,w:272,h:150, role:'plain', k:'LOWERING', t:'PhysicalPlanner',
+    m:['1:1 switch over LogicalPlan::Type','RemapColumnRefs: table-col-id →','chunk-position index','SORT & AGGREGATE each lower to a','SINK+SOURCE pair sharing state'],
+    file:'src/planner/physical_planner.hpp, .cpp'},
+
+  {id:'executor', x:1024,y:104,w:290,h:120, role:'plain', k:'DAG BUILDER', t:'Executor',
+    m:['BuildPipelines: DFS splits the op','tree on SOURCE/SINK boundaries','TopologicalSort orders pipelines','by dependency (build-before-probe)'],
+    file:'src/execution/executor.hpp, .cpp'},
+  {id:'tablescan', x:1024,y:246,w:290,h:150, role:'source', k:'SOURCE', t:'PhysicalTableScan',
+    m:['splits filter_col_ids_ vs payload_','col_ids_ → late materialization','zone-map skip via ScanPredicate','partition pruning: active_partition_','ids_ · 2-phase ScanBatchWithOffsets','then ScanLate for survivors'],
+    file:'src/execution/operator/physical_table_scan.hpp, .cpp'},
+  {id:'filter', x:1024,y:418,w:290,h:90, role:'operator', k:'OPERATOR', t:'PhysicalFilter',
+    m:['ExprEvaluator::EvaluatePredicate','compacts chunk via DataChunkCompact'],
+    file:'src/execution/operator/physical_filter.hpp, .cpp'},
+  {id:'projection', x:1024,y:530,w:290,h:90, role:'operator', k:'OPERATOR', t:'PhysicalProjection',
+    m:['evaluates each expr into one','output column per call'],
+    file:'src/execution/operator/physical_projection.hpp, .cpp'},
+  {id:'limit', x:1024,y:642,w:290,h:105, role:'operator', k:'OPERATOR', t:'PhysicalLimit',
+    m:['drops offset rows, caps to limit','returns FINISHED once the cap is','reached — short-circuits the rest'],
+    file:'src/execution/operator/physical_limit.hpp, .cpp'},
+  {id:'hashagg', x:1024,y:769,w:290,h:135, role:'sink', k:'SINK', t:'PhysicalHashAggregation',
+    m:['scalar fast path: one FindOrCreate','per chunk when there is no GROUP BY','general path pre-evaluates group/agg','vectors once per chunk','shares AggregateHashTable with the','hidden PhysicalAggregationSource'],
+    file:'src/execution/operator/physical_hash_aggregation.hpp, .cpp'},
+  {id:'aggsource', x:1024,y:926,w:290,h:120, role:'source', k:'SOURCE', t:'PhysicalAggregationSource',
+    m:['emits synthetic COUNT(*)=0 row for a','scalar aggregate over an empty table','else iterates the hash table in','STANDARD_VECTOR_SIZE batches'],
+    file:'src/execution/operator/physical_aggregation_source.hpp, .cpp'},
+  {id:'insertop', x:1024,y:1068,w:290,h:150, role:'source', k:'SOURCE / SINK', t:'PhysicalInsert',
+    m:['VALUES path: one-shot GetData','INSERT…SELECT path: SINK, Consume','per chunk from the child pipeline','routes rows via PartitionInfo::','RouteRow, sorts by leading key,','RowGroup::Append + InsertUndoEntry'],
+    file:'src/execution/operator/physical_insert.hpp, .cpp'},
+  {id:'deleteop', x:1024,y:1240,w:290,h:120, role:'source', k:'SOURCE', t:'PhysicalDelete',
+    m:['single-shot: batches per row group,','evaluates predicate,','VersionInfo::MarkDeleted +','DeleteUndoEntry (no old values kept)'],
+    file:'src/execution/operator/physical_delete.hpp, .cpp'},
+
+  {id:'pipelineexecutor', x:1338,y:104,w:290,h:135, role:'plain', k:'RUNTIME LOOP', t:'PipelineExecutor',
+    m:['per pipeline: init states → loop','GetData → chain Execute() through','operators → Consume to sink','TryFlushOperators() drains buffered','ops once the source is exhausted'],
+    file:'src/execution/pipeline_executor.hpp, .cpp'},
+  {id:'joinbuild', x:1338,y:261,w:290,h:120, role:'sink', k:'SINK (right side)', t:'PhysicalHashJoinBuild',
+    m:['Consume inserts every row into a','JoinHashTable (or a per-partition','HT for a partition-wise join)','Executor spins this up as a separate','dependency pipeline of the probe'],
+    file:'src/execution/operator/physical_hash_join.hpp, .cpp'},
+  {id:'joinprobe', x:1338,y:403,w:290,h:150, role:'operator', k:'OPERATOR (left side)', t:'PhysicalHashJoinProbe',
+    m:['output columns pre-sized to','STANDARD_VECTOR_SIZE (no realloc)','batch ComputeHashes over typed','arrays, no Value boxing, then','ProbeByHash + full key-equality','recheck defeats hash collisions'],
+    file:'src/execution/operator/physical_hash_join.hpp, .cpp'},
+  {id:'sortsink', x:1338,y:575,w:290,h:120, role:'sink', k:'SINK', t:'PhysicalSort',
+    m:['Consume: bulk memcpy per column','(faster than per-row append)','Finalize: top_k>0 → bounded heap;','else stable_sort via typed','CompareSortRows on (chunk,row)'],
+    file:'src/execution/operator/physical_sort.hpp, .cpp'},
+  {id:'sortsource', x:1338,y:717,w:290,h:105, role:'source', k:'SOURCE', t:'PhysicalSortSource',
+    m:['walks buf->sorted_order, emits up','to STANDARD_VECTOR_SIZE rows/call','shares the SortBuffer with','the PhysicalSort sink'],
+    file:'src/execution/operator/physical_sort_source.hpp, .cpp'},
+  {id:'resultcollector', x:1338,y:844,w:290,h:105, role:'sink', k:'SINK (terminal)', t:'PhysicalResultCollector',
+    m:['always the outermost sink','Consume deep-copies each chunk','via DataChunkSlice into QueryResult'],
+    file:'src/execution/physical_result_collector.hpp, .cpp'},
+  {id:'updateop', x:1338,y:971,w:290,h:120, role:'source', k:'SOURCE', t:'PhysicalUpdate',
+    m:['single-shot per row group:','ScanBatchWithOffsets → eval','predicate → eval SET exprs once','per batch → ColumnChunk::WriteRows'],
+    file:'src/execution/operator/physical_update.hpp, .cpp'},
+  {id:'ddlops', x:1338,y:1113,w:290,h:135, role:'source', k:'SOURCE', t:'DDL Operators',
+    m:['PhysicalCreateTable / DropTable /','AlterTable — one-shot catalog','mutation, no data flows through','ALTER: DROP_PARTITION / ADD_PARTITION','(HASH rejected for ADD by Binder)'],
+    file:'src/execution/operator/physical_{create,drop,alter}_table.hpp, .cpp'},
+
+  {id:'catalog', x:1700,y:104,w:270,h:120, role:'plain', k:'METADATA ROOT', t:'Catalog',
+    m:['unordered_map<string,Schema> schemas_','DEFAULT_SCHEMA = "main"','Serialize/Deserialize into Block 0','FlushAllRowGroups skips RGs with','uncommitted version markers'],
+    file:'src/catalog/catalog.hpp, .cpp'},
+  {id:'tablecatalogentry', x:1700,y:246,w:270,h:135, role:'plain', k:'ENTRY', t:'TableCatalogEntry',
+    m:['columns[ColumnDefinition]','row_groups[unique_ptr<RowGroup>]','partition_info + partition_rg_indices','GetOrAddRowGroup(): new RG once the','last one hits ROW_GROUP_SIZE'],
+    file:'src/catalog/catalog_entry.hpp, .cpp'},
+  {id:'rowgroup', x:1700,y:403,w:270,h:135, role:'plain', k:'COLUMNAR CONTAINER', t:'RowGroup',
+    m:['column_chunks_[ColumnChunk] plus one','VersionInfo per row group','Scan(): fast path skips per-row','MVCC checks via AllInsertedVisibleTo','Append / CommitAppend / RevertAppend'],
+    file:'src/storage/column/row_group.hpp, .cpp'},
+  {id:'columnchunk', x:1700,y:560,w:270,h:135, role:'plain', k:'PER-COLUMN', t:'ColumnChunk',
+    m:['pending_data_ (uncompressed tail,','≤ STANDARD_VECTOR_SIZE=1024 rows)','plus segments_[ColumnSegment]','Flush(): SelectCompression →','AllocateBlock → Compress','WriteRows batches decompress+mutate'],
+    file:'src/storage/column/column_chunk.hpp, .cpp'},
+  {id:'buffermanager', x:1700,y:717,w:270,h:150, role:'plain', k:'LRU CACHE', t:'BufferManager', risk:1,
+    m:['256 MiB pool, 256 KiB blocks','Frame{buffer,pin_count,dirty,lru_it}','Pin(): hit unlinks from LRU; miss','evicts LRU tail then reads the block','see gap: block id reseeding'],
+    file:'src/storage/buffer_manager.hpp, .cpp',
+    gotcha:'next_block_id_ always starts at 0 and is never reseeded from BlockFile::BlockCount() when reopening a persisted database file — a latent block-id collision risk on reopen.'},
+  {id:'scanpredicate', x:1700,y:889,w:270,h:105, role:'plain', k:'PRUNING FORM', t:'ScanPredicate',
+    m:['{col_idx, op ∈ {EQ,LT,LE,GT,GE}, bound}','no NE / IN / BETWEEN','col_idx is chunk-position for zone-','map, table-column index for partitions'],
+    file:'src/storage/scan_predicate.hpp'},
+
+  {id:'schema', x:1990,y:104,w:270,h:120, role:'plain', k:'NAMESPACE', t:'Schema',
+    m:['entries_: name → version-chain of','CatalogEntry (MVCC create/delete)','IsCatalogEntryVisible: own-creation','bypass + create/delete commit checks'],
+    file:'src/catalog/schema.hpp, .cpp'},
+  {id:'partitioninfo', x:1990,y:246,w:270,h:150, role:'plain', k:'ROUTING + PRUNING', t:'PartitionInfo', risk:1,
+    m:['RANGE / HASH / LIST','RouteRow: lexicographic scan (RANGE),','h*31+hash mod N (HASH), tuple','match (LIST)','PrunedPartitions: only the leading','key column drives pruning'],
+    file:'src/storage/partition_info.hpp, .cpp',
+    gotcha:'Composite partition/routing keys are capped at 8 columns (stack-allocated Value keys[8]), and PrunedPartitions uses only the leading key column for RANGE/LIST pruning — columns beyond the first are ignored for skip decisions.'},
+  {id:'versioninfo', x:1990,y:418,w:270,h:135, role:'plain', k:'MVCC MARKERS', t:'VersionInfo',
+    m:['unordered_map<row_offset,VersionMarker>','{DELETE,INSERT,UPDATE} × {tx_id,','commit_time}','3 counters power the O(1) fast path:','uncommitted_count_, delete_update_','count_, max_insert_commit_time_'],
+    file:'src/storage/column/version_info.hpp, .cpp'},
+  {id:'columnsegment', x:1990,y:575,w:270,h:150, role:'store', k:'COMPRESSED BLOCK', t:'ColumnSegment + Codecs', risk:1,
+    m:['UNCOMPRESSED · RLE · BIT_PACKED ·','DELTA · DICTIONARY','SelectCompression: all-equal→RLE,','range≤32bit→BIT_PACKED, monotonic→','DELTA · SegmentStats = zone map','see gap: delta width'],
+    file:'src/storage/column/column_segment.hpp + compression/*',
+    gotcha:'DELTA compression stores per-value deltas as int32 — a jump between consecutive values larger than the int32 range truncates silently instead of falling back to another codec.'},
+  {id:'blockfile', x:1990,y:747,w:270,h:120, role:'store', k:'ON-DISK', t:'BlockFile',
+    m:['fixed-size blocks over POSIX','pread/pwrite/fsync','Block 0 reserved for the serialized','Catalog · AllocateBlock() appends a','zero-filled block'],
+    file:'src/storage/block_file.hpp, .cpp'},
+
+  {id:'txnmanager', x:2320,y:104,w:280,h:135, role:'plain', k:'LIFECYCLE', t:'TransactionManager',
+    m:['next_tx_id_, commit_counter_','(atomics) · start_time =','commit_counter_+1 at Begin','Commit: WriteToWAL → assign','commit_time → ApplyUndoBuffer','Rollback: UndoBufferReverse'],
+    file:'src/transaction/transaction_manager.hpp, .cpp'},
+  {id:'transaction', x:2320,y:261,w:280,h:105, role:'plain', k:'HANDLE', t:'Transaction',
+    m:['tx_id, start_time, commit_time,','auto_commit, UndoBuffer','WriteToWAL(): undo entries double','as the WAL redo payload'],
+    file:'src/transaction/transaction.hpp, .cpp'},
+  {id:'undobuffer', x:2320,y:388,w:280,h:120, role:'plain', k:'ROLLBACK LOG', t:'UndoBuffer / UndoEntry',
+    m:['variant<Catalog,Insert,Delete,','Update,AlterPartition>UndoEntry','UPDATE rollback batches offsets into','one WriteRows call per column,','not a WriteRow call per row'],
+    file:'src/transaction/undo_buffer.hpp, .cpp'},
+  {id:'wal', x:2320,y:530,w:280,h:135, role:'store', k:'WRITE-AHEAD LOG', t:'WAL',
+    m:['5-byte header {type,data_size} plus','payload · Flush(): write() loop +','fsync — the only durability point','ReadNextEntry drops a truncated tail','entry silently, no exception','Truncate() keeps the post-checkpoint tail'],
+    file:'src/storage/wal.hpp, .cpp'},
+  {id:'checkpointmanager', x:2320,y:687,w:280,h:195, role:'plain', k:'DURABILITY', t:'CheckpointManager', risk:1,
+    m:['skip if already checkpointing or if','uncommitted version markers exist','1. WAL marker + flush','2. FlushAllRowGroups + serialize','   Catalog into Block 0','3. BufferManager::Flush (all dirty)','4. WAL::Truncate','see gap: async path unwired'],
+    file:'src/checkpoint/checkpoint_manager.hpp, .cpp',
+    gotcha:'ScheduleAsyncCheckpoint and the TaskScheduler both work correctly, but nothing in the default Database lifecycle ever calls the async path — checkpoints today only happen synchronously inside Database::Shutdown().'},
+  {id:'recovery', x:2320,y:904,w:280,h:135, role:'plain', k:'STARTUP', t:'Crash Recovery', risk:1,
+    m:['Deserialize Catalog from Block 0','ReplayWAL from the last CHECKPOINT','marker; each entry replays as its','own auto-commit transaction','see gap: schema DDL on replay'],
+    file:'src/main/database.cpp (ReplayWAL)',
+    gotcha:'WAL_CREATE_SCHEMA and WAL_DROP_SCHEMA entries have no case in ReplayWAL\'s dispatch switch and are silently skipped during crash recovery.'},
+
+  {id:'taskscheduler', x:760,y:1474,w:260,h:120, role:'plain', k:'THREAD POOL', t:'TaskScheduler',
+    m:['FIFO deque + 1 worker thread by','default · WorkerLoop catches and logs','exceptions, no retry / dead-letter','only consumer today: the unwired','async checkpoint task'],
+    file:'src/parallel/task_scheduler.hpp, .cpp'},
+  {id:'profiler', x:1060,y:1474,w:320,h:135, role:'plain', k:'OBSERVABILITY', t:'QueryProfiler / OperatorProfiler',
+    m:['phases: PARSE · BIND · OPTIMIZE ·','PHYSICAL_PLAN · EXECUTE','OperatorProfileGuard (RAII) wraps','every GetData/Execute/Consume call','EXPLAIN ANALYZE forces profiling on','and returns ToString() as QUERY PLAN'],
+    file:'src/profiler/{query_profiler,operator_profiler,profiling_result}.hpp'},
+  {id:'benchmark', x:1420,y:1474,w:340,h:135, role:'plain', k:'HARNESS', t:'benchmark_cppcoldb',
+    m:['8 cases: count_scan, filter_count,','join_orderby_limit, orderby_limit,','filter_project, insert/update/','delete_rollback','100K rows Release: scan 743 qps,','join 72 qps, insert_rollback 4651 qps'],
+    file:'test/benchmark/benchmark_main.cpp'}
+];
+
+var EDGES = [
+  ['e-repl-db','repl','database'],
+  ['e-db-conn','database','connection'],
+  ['e-conn-ctx','connection','clientcontext'],
+  ['e-conn-txm','connection','txnmanager','Begin/Commit/Rollback'],
+  ['e-ctx-tok','clientcontext','tokenizer','SQL string'],
+  ['e-tok-par','tokenizer','parser','vector<Token>'],
+  ['e-par-ast','parser','ast','ParsedStatement'],
+  ['e-ast-bind','ast','binder'],
+  ['e-bind-bc','binder','bindcontext','resolve names'],
+  ['e-bind-cat','binder','catalog','GetTable(), MVCC-aware'],
+  ['e-bind-lp','binder','logicalplan','produces'],
+  ['e-lp-opt','logicalplan','optimizer'],
+  ['e-opt-pp','optimizer','physicalplanner'],
+  ['e-pp-exec','physicalplanner','executor','PhysicalOperator tree'],
+  ['e-exec-pe','executor','pipelineexecutor','per pipeline, topo order'],
+  ['e-pe-ts','pipelineexecutor','tablescan'],
+  ['e-pe-jb','pipelineexecutor','joinbuild'],
+  ['e-pe-jp','pipelineexecutor','joinprobe'],
+  ['e-pe-ss','pipelineexecutor','sortsink'],
+  ['e-pe-ha','pipelineexecutor','hashagg'],
+  ['e-pe-rc','pipelineexecutor','resultcollector'],
+  ['e-pe-ins','pipelineexecutor','insertop'],
+  ['e-pe-upd','pipelineexecutor','updateop'],
+  ['e-pe-del','pipelineexecutor','deleteop'],
+  ['e-pe-ddl','pipelineexecutor','ddlops'],
+  ['e-ts-filter','tablescan','filter'],
+  ['e-filter-proj','filter','projection'],
+  ['e-proj-limit','projection','limit'],
+  ['e-jb-jp','joinbuild','joinprobe','JoinHashTable'],
+  ['e-jp-proj','joinprobe','projection'],
+  ['e-ss-sso','sortsink','sortsource','SortBuffer'],
+  ['e-sso-rc','sortsource','resultcollector'],
+  ['e-ha-as','hashagg','aggsource','AggregateHashTable'],
+  ['e-as-rc','aggsource','resultcollector'],
+  ['e-limit-rc','limit','resultcollector'],
+  ['e-ts-rg','tablescan','rowgroup','Scan(snapshot_time)'],
+  ['e-insert-rg','insertop','rowgroup','Append'],
+  ['e-update-cc','updateop','columnchunk','WriteRows'],
+  ['e-delete-vi','deleteop','versioninfo','MarkDeleted'],
+  ['e-insert-ub','insertop','undobuffer','InsertUndoEntry'],
+  ['e-update-ub','updateop','undobuffer','UpdateUndoEntry'],
+  ['e-delete-ub','deleteop','undobuffer','DeleteUndoEntry'],
+  ['e-ddl-cat','ddlops','catalog','CREATE/DROP/ALTER TABLE'],
+  ['e-ts-part','tablescan','partitioninfo','PrunedPartitions'],
+  ['e-insert-part','insertop','partitioninfo','RouteRow'],
+  ['e-ts-sp','tablescan','scanpredicate','zone-map bounds'],
+  ['e-cat-schema','catalog','schema'],
+  ['e-schema-tce','schema','tablecatalogentry'],
+  ['e-tce-rg','tablecatalogentry','rowgroup'],
+  ['e-tce-part','tablecatalogentry','partitioninfo'],
+  ['e-rg-cc','rowgroup','columnchunk'],
+  ['e-rg-vi','rowgroup','versioninfo'],
+  ['e-cc-cseg','columnchunk','columnsegment','Flush() at 1024 rows'],
+  ['e-cseg-bm','columnsegment','buffermanager','Pin / decompress'],
+  ['e-bm-bf','buffermanager','blockfile','read/write block'],
+  ['e-txm-tx','txnmanager','transaction'],
+  ['e-tx-ub','transaction','undobuffer'],
+  ['e-tx-wal','transaction','wal','WriteToWAL (redo)'],
+  ['e-wal-ckpt','wal','checkpointmanager','WriteCheckpointMarker'],
+  ['e-ckpt-cat','checkpointmanager','catalog','Serialize → Block 0'],
+  ['e-ckpt-bm','checkpointmanager','buffermanager','Flush dirty blocks'],
+  ['e-ckpt-bf','checkpointmanager','blockfile'],
+  ['e-ckpt-wal','checkpointmanager','wal','Truncate()'],
+  ['e-db-rec','database','recovery','startup, if WAL non-empty'],
+  ['e-rec-wal','recovery','wal','replay from last CHECKPOINT'],
+  ['e-rec-cat','recovery','catalog','Deserialize Block 0'],
+  ['e-rec-txm','recovery','txnmanager','one auto-commit tx / entry'],
+  ['e-sched-ckpt','taskscheduler','checkpointmanager','AsyncCheckpointTask (unused today)',true],
+  ['e-prof-exec','profiler','executor','RegisterOperators',true],
+  ['e-prof-pe','profiler','pipelineexecutor','OperatorProfileGuard',true],
+  ['e-prof-ctx','profiler','clientcontext','phase timings',true],
+  ['e-bench-conn','benchmark','connection','drives Query() in a loop',true],
+  ['e-vi-tx','versioninfo','transaction','IsVisible(offset, tx)'],
+  ['e-db-bf','database','blockfile','opens on InitPersistent'],
+  ['e-db-bm','database','buffermanager','opens on InitPersistent'],
+  ['e-db-cat','database','catalog','constructs; Deserialize(Block 0)'],
+  ['e-db-wal','database','wal','WAL::Create after replay'],
+  ['e-db-ckpt','database','checkpointmanager','constructs'],
+  ['e-db-sched','database','taskscheduler','constructs, 1 thread default']
+];
+
+var FLOWS = {
+  select: {
+    name: 'SELECT — full query lifecycle',
+    nodes: ['repl','database','connection','clientcontext','tokenizer','parser','ast','binder','bindcontext','catalog','logicalplan','optimizer','physicalplanner','executor','pipelineexecutor','tablescan','filter','projection','limit','resultcollector','rowgroup'],
+    edges: ['e-repl-db','e-db-conn','e-conn-ctx','e-ctx-tok','e-tok-par','e-par-ast','e-ast-bind','e-bind-bc','e-bind-cat','e-bind-lp','e-lp-opt','e-opt-pp','e-pp-exec','e-exec-pe','e-pe-ts','e-ts-filter','e-filter-proj','e-proj-limit','e-limit-rc','e-ts-rg'],
+    steps: ['Connection::Query begins an auto-commit transaction, then hands the SQL string to ClientContext::Query','Tokenizer → Parser build a ParsedStatement AST; Binder resolves names against the Catalog and produces a LogicalPlan','Optimizer runs its four fixed-order passes, then PhysicalPlanner lowers the plan into a PhysicalOperator tree','Executor splits that tree into a pipeline DAG; PipelineExecutor drives TableScan → Filter → Projection → Limit into the ResultCollector']
+  },
+  write: {
+    name: 'INSERT / UPDATE / DELETE — write path',
+    nodes: ['connection','txnmanager','transaction','undobuffer','pipelineexecutor','insertop','updateop','deleteop','rowgroup','columnchunk','versioninfo','partitioninfo','wal'],
+    edges: ['e-conn-txm','e-txm-tx','e-tx-ub','e-pe-ins','e-pe-upd','e-pe-del','e-insert-rg','e-insert-ub','e-insert-part','e-update-cc','e-update-ub','e-delete-vi','e-delete-ub','e-rg-cc','e-rg-vi','e-tx-wal'],
+    steps: ['A mutation operator (Insert/Update/Delete) runs as a one-shot SOURCE inside its pipeline, never through a SINK+SOURCE split','Insert routes rows through PartitionInfo::RouteRow and appends to RowGroup; Update/Delete mark VersionInfo markers and rewrite ColumnChunk segments','Every mutation records an UndoEntry in the active Transaction\'s UndoBuffer — the same entry doubles as the WAL redo payload on commit','On commit, Transaction::WriteToWAL serializes the undo buffer to the WAL before commit_time is assigned; on rollback, the buffer is replayed in reverse instead']
+  },
+  join: {
+    name: 'Hash join — build then probe',
+    nodes: ['pipelineexecutor','joinbuild','joinprobe','projection'],
+    edges: ['e-pe-jb','e-pe-jp','e-jb-jp','e-jp-proj'],
+    steps: ['PhysicalHashJoinBuild is scheduled as its own dependency pipeline over the right-hand child, inserting every row into a JoinHashTable','Once the build pipeline finishes, PhysicalHashJoinProbe runs over the left-hand child, batch-hashing typed columns with no Value boxing','Probe verifies full key equality after a hash match (defeats collisions) and emits concatenated left‖right rows onward to Projection']
+  },
+  sort: {
+    name: 'ORDER BY — sink then source',
+    nodes: ['pipelineexecutor','sortsink','sortsource','resultcollector'],
+    edges: ['e-pe-ss','e-ss-sso','e-sso-rc'],
+    steps: ['PhysicalSort is a SINK: it bulk-copies every input chunk into a shared SortBuffer via per-column memcpy','On Finalize, it either runs a bounded top-k heap (when LIMIT is fused above the sort) or a full stable_sort over a typed row-index','PhysicalSortSource is a separate SOURCE that shares the same SortBuffer and streams the sorted rows onward to the ResultCollector']
+  },
+  aggregate: {
+    name: 'GROUP BY — sink then source',
+    nodes: ['pipelineexecutor','hashagg','aggsource','resultcollector'],
+    edges: ['e-pe-ha','e-ha-as','e-as-rc'],
+    steps: ['PhysicalHashAggregation is a SINK: with no GROUP BY it takes a scalar fast path (one hash lookup per chunk); otherwise it hashes per row into an AggregateHashTable','PhysicalAggregationSource is the paired SOURCE reading the same hash table once the build side is finalized','A scalar aggregate over zero input rows still emits one synthetic COUNT(*)=0 row so SELECT COUNT(*) never returns an empty result set']
+  },
+  mvcc: {
+    name: 'MVCC — row visibility on scan',
+    nodes: ['tablescan','rowgroup','versioninfo','transaction'],
+    edges: ['e-ts-rg','e-rg-vi','e-vi-tx'],
+    steps: ['PhysicalTableScan calls RowGroup::Scan with the transaction\'s snapshot_time','AllInsertedVisibleTo(tx_start) is an O(1) fast path: if a row group has zero uncommitted markers, zero delete/update markers, and every insert committed before this snapshot, every row is visible with no per-row lookup','Otherwise each row falls back to VersionInfo::IsVisible, which applies different rules per marker type — an uncommitted DELETE from another transaction stays visible, but an uncommitted INSERT or UPDATE from another transaction is hidden']
+  },
+  checkpoint: {
+    name: 'Checkpoint & crash recovery',
+    nodes: ['wal','checkpointmanager','catalog','buffermanager','blockfile','taskscheduler','database','recovery','txnmanager'],
+    edges: ['e-tx-wal','e-wal-ckpt','e-ckpt-cat','e-ckpt-bm','e-ckpt-bf','e-ckpt-wal','e-sched-ckpt','e-db-rec','e-rec-wal','e-rec-cat','e-rec-txm'],
+    steps: ['CheckpointManager::CreateCheckpoint skips itself if another checkpoint is running or if any row group still has uncommitted version markers','It writes and flushes a WAL checkpoint marker first, then flushes row groups, serializes the Catalog into Block 0, flushes all dirty buffer frames, and finally truncates the WAL to the post-marker tail','On startup, Database deserializes the Catalog from Block 0, then ReplayWAL replays every entry after the last checkpoint marker, each as its own auto-commit transaction','The async checkpoint path exists on TaskScheduler but nothing in the default lifecycle invokes it — checkpoints happen synchronously today, only on clean Database::Shutdown()']
+  },
+  partition: {
+    name: 'Partition routing & pruning',
+    nodes: ['insertop','tablescan','partitioninfo','rowgroup','tablecatalogentry'],
+    edges: ['e-insert-part','e-ts-part','e-tce-part','e-insert-rg','e-ts-rg'],
+    steps: ['On INSERT, PartitionInfo::RouteRow evaluates the partition key (RANGE lexicographic scan, HASH modulo, or LIST tuple match) to pick a target RowGroup','On SCAN, PrunedPartitions inspects predicates on the leading partition-key column only — an EQ predicate can resolve to one exact partition; a range predicate binary-searches the contiguous partition-id span','TableCatalogEntry keeps a sorted RowGroup index per partition (partition_rg_indices) so pruning skips entire RowGroups without touching a single ColumnChunk']
+  },
+  profiling: {
+    name: 'Profiling & the benchmark harness',
+    nodes: ['clientcontext','executor','pipelineexecutor','profiler','benchmark','connection'],
+    edges: ['e-prof-ctx','e-prof-exec','e-prof-pe','e-bench-conn'],
+    steps: ['ClientContext brackets each query phase (PARSE, BIND, OPTIMIZE, PHYSICAL_PLAN, EXECUTE) with QueryProfiler::StartPhase/EndPhase calls','Executor::Execute registers every physical operator with the profiler only if profiling is active, then PipelineExecutor wraps each GetData/Execute/Consume call in an OperatorProfileGuard','EXPLAIN ANALYZE forces profiling on for one statement and returns ProfilingResult::ToString() as the QUERY PLAN column instead of running the query for its rows','The benchmark_cppcoldb harness is just another caller of Connection::Query, run in warmup + timed loops — it does not use the profiler at all, it measures wall-clock time around each statement from outside']
+  },
+  bootstrap: {
+    name: 'Bootstrap — cold start to ready',
+    nodes: ['repl','database','blockfile','buffermanager','catalog','recovery','wal','txnmanager','checkpointmanager','taskscheduler','connection'],
+    edges: ['e-repl-db','e-db-bf','e-db-bm','e-db-cat','e-db-rec','e-rec-wal','e-rec-cat','e-rec-txm','e-db-wal','e-db-ckpt','e-db-sched','e-db-conn'],
+    steps: ['main.cpp constructs a Database — in-memory if no path is given, else InitPersistent(path) opens the BlockFile and BufferManager on disk','If the block file already has committed blocks, Catalog::Deserialize reads schema/table metadata back from Block 0','If a non-empty WAL file survives from a previous run, ReplayWAL replays every entry after the last CHECKPOINT marker before anything else proceeds — this is the crash-recovery path from the other flow, folded into every startup','InitPersistent then opens a fresh WAL for new writes and constructs the real TransactionManager, CheckpointManager, and a TaskScheduler (1 worker thread by default)','Database::Connect() hands back a Connection, and the REPL loop can start accepting SQL statements']
+  }
+};
+
+// ---------------------------------------------------------------------------
+// RENDER
+// ---------------------------------------------------------------------------
+var SVGNS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, parent) {
+  var e = document.createElementNS(SVGNS, tag);
+  for (var k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function textLines(x, y, lines, cls, lh) {
+  var g = document.createDocumentFragment();
+  lines.forEach(function (line, i) {
+    var t = el('text', {x: x, y: y + i * lh, class: cls}, null);
+    t.textContent = line;
+    g.appendChild(t);
+  });
+  return g;
+}
+
+var byId = {};
+NODES.forEach(function (n) { byId[n.id] = n; });
+
+var zonesLayer = document.getElementById('zonesLayer');
+var edgesLayer = document.getElementById('edgesLayer');
+var labelsLayer = document.getElementById('labelsLayer');
+var nodesLayer = document.getElementById('nodesLayer');
+
+ZONES.forEach(function (z) {
+  var g = el('g', {class: 'zone', id: 'z-' + z.id}, zonesLayer);
+  el('rect', {x: z.x, y: z.y, width: z.w, height: z.h}, g);
+  var ttl = el('text', {class: 'ztitle', x: z.x + 20, y: z.y + 26}, g);
+  ttl.textContent = z.t;
+  var sub = el('text', {class: 'zsub', x: z.x + 20, y: z.y + 42}, g);
+  sub.textContent = z.s;
+});
+
+function anchorPoints(a, b) {
+  var acx = a.x + a.w / 2, acy = a.y + a.h / 2;
+  var bcx = b.x + b.w / 2, bcy = b.y + b.h / 2;
+  var dx = bcx - acx, dy = bcy - acy;
+  var sx, sy, ex, ey, c1x, c1y, c2x, c2y;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    if (dx >= 0) { sx = a.x + a.w; ex = b.x; } else { sx = a.x; ex = b.x + b.w; }
+    sy = acy; ey = bcy;
+    var bend = Math.min(80, Math.abs(dx) * 0.4) * (dx >= 0 ? 1 : -1);
+    c1x = sx + bend; c1y = sy;
+    c2x = ex - bend; c2y = ey;
+  } else {
+    if (dy >= 0) { sy = a.y + a.h; ey = b.y; } else { sy = a.y; ey = b.y + b.h; }
+    sx = acx; ex = bcx;
+    var bendv = Math.min(70, Math.abs(dy) * 0.4) * (dy >= 0 ? 1 : -1);
+    c1x = sx; c1y = sy + bendv;
+    c2x = ex; c2y = ey - bendv;
+  }
+  return {sx: sx, sy: sy, c1x: c1x, c1y: c1y, c2x: c2x, c2y: c2y, ex: ex, ey: ey};
+}
+
+EDGES.forEach(function (e) {
+  var id = e[0], from = byId[e[1]], to = byId[e[2]], label = e[3], dashed = e[4];
+  if (!from || !to) return;
+  var p = anchorPoints(from, to);
+  var d = 'M ' + p.sx.toFixed(1) + ',' + p.sy.toFixed(1) +
+          ' C ' + p.c1x.toFixed(1) + ',' + p.c1y.toFixed(1) + ' ' +
+          p.c2x.toFixed(1) + ',' + p.c2y.toFixed(1) + ' ' +
+          p.ex.toFixed(1) + ',' + p.ey.toFixed(1);
+  el('path', {id: id, class: 'edge' + (dashed ? ' dash' : ''), d: d}, edgesLayer);
+  if (label) {
+    var mx = (p.sx + p.ex) / 2, my = (p.sy + p.ey) / 2;
+    var lbl = el('text', {class: 'elbl', 'data-e': id, x: mx.toFixed(1), y: my.toFixed(1)}, labelsLayer);
+    lbl.textContent = label;
+  }
+});
+
+var ROLE_KICK = {source: '', operator: '', sink: '', store: '', plain: ''};
+NODES.forEach(function (n) {
+  var g = el('g', {class: 'node role-' + n.role, 'data-k': n.id, 'data-risk': n.risk ? '1' : '0'}, nodesLayer);
+  el('rect', {class: 'box', x: n.x, y: n.y, width: n.w, height: n.h}, g);
+  el('rect', {class: 'accent', x: n.x, y: n.y, width: 4, height: n.h, rx: 2}, g);
+  el('text', {class: 'k', x: n.x + 14, y: n.y + 18}, g).textContent = n.k;
+  el('text', {class: 't', x: n.x + 14, y: n.y + 36}, g).textContent = n.t;
+  g.appendChild(textLines(n.x + 14, n.y + 54, n.m, 'm', 13.3));
+  if (n.risk) {
+    var bd = el('g', {class: 'riskbadge'}, g);
+    el('circle', {cx: n.x + n.w - 14, cy: n.y + 14, r: 9}, bd);
+    el('text', {x: n.x + n.w - 14, y: n.y + 18, 'text-anchor': 'middle'}, bd).textContent = '!';
+  }
+});
+
+// ---------------------------------------------------------------------------
+// INTERACTION — pan / zoom
+// ---------------------------------------------------------------------------
+var svg = document.getElementById('svg');
+var stage = document.getElementById('stage');
+var VB = {x: 0, y: 0, w: 2680, h: 1700};
+var VB0 = {x: 0, y: 0, w: 2680, h: 1700};
+function applyVB() { svg.setAttribute('viewBox', VB.x.toFixed(1) + ' ' + VB.y.toFixed(1) + ' ' + VB.w.toFixed(1) + ' ' + VB.h.toFixed(1)); }
+applyVB();
+
+function screenToSvg(clientX, clientY) {
+  var rect = stage.getBoundingClientRect();
+  var relX = (clientX - rect.left) / rect.width;
+  var relY = (clientY - rect.top) / rect.height;
+  return {x: VB.x + relX * VB.w, y: VB.y + relY * VB.h};
+}
+function zoomAt(factor, clientX, clientY) {
+  var p = screenToSvg(clientX, clientY);
+  var newW = Math.max(400, Math.min(5000, VB.w * factor));
+  var newH = newW * (VB0.h / VB0.w);
+  var fx = (p.x - VB.x) / VB.w, fy = (p.y - VB.y) / VB.h;
+  VB.x = p.x - fx * newW; VB.y = p.y - fy * newH;
+  VB.w = newW; VB.h = newH;
+  applyVB();
+}
+document.getElementById('zoomIn').addEventListener('click', function () {
+  var r = stage.getBoundingClientRect();
+  zoomAt(0.8, r.left + r.width / 2, r.top + r.height / 2);
+});
+document.getElementById('zoomOut').addEventListener('click', function () {
+  var r = stage.getBoundingClientRect();
+  zoomAt(1.25, r.left + r.width / 2, r.top + r.height / 2);
+});
+document.getElementById('zoomReset').addEventListener('click', function () {
+  VB = {x: VB0.x, y: VB0.y, w: VB0.w, h: VB0.h}; applyVB();
+});
+stage.addEventListener('wheel', function (ev) {
+  ev.preventDefault();
+  var factor = ev.deltaY > 0 ? 1.12 : 0.89;
+  zoomAt(factor, ev.clientX, ev.clientY);
+}, {passive: false});
+
+var dragging = false, dragStart = null, vbStart = null;
+stage.addEventListener('mousedown', function (ev) {
+  dragging = true; stage.classList.add('dragging');
+  dragStart = {x: ev.clientX, y: ev.clientY}; vbStart = {x: VB.x, y: VB.y};
+});
+window.addEventListener('mousemove', function (ev) {
+  if (!dragging) return;
+  var rect = stage.getBoundingClientRect();
+  var dxs = (ev.clientX - dragStart.x) / rect.width * VB.w;
+  var dys = (ev.clientY - dragStart.y) / rect.height * VB.h;
+  VB.x = vbStart.x - dxs; VB.y = vbStart.y - dys;
+  applyVB();
+});
+window.addEventListener('mouseup', function () { dragging = false; stage.classList.remove('dragging'); });
+
+// ---------------------------------------------------------------------------
+// INTERACTION — flows, detail, risk toggle, theme
+// ---------------------------------------------------------------------------
+var chips = document.querySelectorAll('.chip[data-flow]');
+var fcap = document.getElementById('flowcap');
+
+function setFlow(key) {
+  chips.forEach(function (c) { c.classList.toggle('on', c.dataset.flow === key); });
+  document.querySelectorAll('.edge').forEach(function (e) { e.classList.remove('lit'); });
+  document.querySelectorAll('.elbl').forEach(function (l) { l.classList.remove('lit'); });
+  document.querySelectorAll('.node').forEach(function (n) { n.classList.remove('lit'); });
+  if (key === 'all') { svg.classList.remove('flowing'); fcap.classList.remove('show'); return; }
+  var f = FLOWS[key];
+  if (!f) return;
+  svg.classList.add('flowing');
+  f.edges.forEach(function (id) {
+    var e = document.getElementById(id);
+    if (e) e.classList.add('lit');
+  });
+  document.querySelectorAll('.elbl').forEach(function (l) {
+    if (f.edges.indexOf(l.dataset.e) !== -1) l.classList.add('lit');
+  });
+  f.nodes.forEach(function (k) {
+    var n = document.querySelector('.node[data-k="' + k + '"]');
+    if (n) n.classList.add('lit');
+  });
+  document.getElementById('f-name').textContent = f.name;
+  document.getElementById('f-steps').innerHTML = f.steps.map(function (s) { return '<li>' + s + '</li>'; }).join('');
+  fcap.classList.add('show');
+}
+chips.forEach(function (c) { c.addEventListener('click', function () { setFlow(c.dataset.flow); }); });
+
+var riskChip = document.getElementById('riskChip');
+riskChip.addEventListener('click', function () {
+  var on = svg.classList.toggle('show-risk');
+  riskChip.classList.toggle('on', on);
+});
+
+document.querySelectorAll('.node').forEach(function (ng) {
+  ng.addEventListener('mousedown', function (ev) { ev.stopPropagation(); });
+  ng.addEventListener('click', function () {
+    document.querySelectorAll('.node').forEach(function (x) { x.classList.remove('sel'); });
+    ng.classList.add('sel');
+    var n = byId[ng.dataset.k];
+    if (!n) return;
+    document.getElementById('d-title').textContent = n.t;
+    var kickEl = document.querySelector('#detail .kick');
+    kickEl.textContent = n.k.toLowerCase();
+    document.querySelector('#detail .file').textContent = n.file;
+    document.getElementById('d-body').innerHTML = n.m.map(function (line) { return '<li>' + line + '</li>'; }).join('');
+    var old = document.querySelector('#detail .gotcha');
+    if (old) old.remove();
+    if (n.gotcha) {
+      var g = document.createElement('div');
+      g.className = 'gotcha';
+      g.innerHTML = '<b>Confirmed gap —</b> ' + n.gotcha;
+      document.getElementById('detail').appendChild(g);
+    }
+  });
+});
+
+document.getElementById('themeToggle').addEventListener('click', function () {
+  var dark = !document.documentElement.classList.contains('dark');
+  document.documentElement.classList.toggle('dark', dark);
+  localStorage.setItem('cppcoldb-theme', dark ? 'dark' : 'light');
+});
+</script>
+</body>
+</html>
