@@ -1,0 +1,3 @@
+add_executable(cppcoldbv2_cli main.cpp)
+target_link_libraries(cppcoldbv2_cli PRIVATE cppcoldbv2)
+target_compile_features(cppcoldbv2_cli PRIVATE cxx_std_20)

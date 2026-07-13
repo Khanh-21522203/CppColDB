@@ -1,0 +1,695 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CppColDBv2 — desired architecture</title>
+<script>
+  (function () {
+    const saved = localStorage.getItem("cppcoldb-v2-theme");
+    const dark = saved ? saved === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.classList.toggle("dark", dark);
+  })();
+</script>
+<style>
+  :root {
+    --bg: #f8f6ee;
+    --surface: #ffffff;
+    --surface-2: #eee9dd;
+    --ink: #171716;
+    --body: #393936;
+    --muted: #7b7b74;
+    --line: #cec8b8;
+    --line-soft: #e3ded0;
+    --zone: rgba(23, 23, 22, 0.028);
+    --shadow: rgba(20, 20, 18, 0.10);
+    --common: #3f7d7b;
+    --common-soft: rgba(63, 125, 123, 0.13);
+    --engine: #b46143;
+    --engine-soft: rgba(180, 97, 67, 0.13);
+    --infrastructure: #557a46;
+    --infrastructure-soft: rgba(85, 122, 70, 0.13);
+    --sql: #8a6f2a;
+    --sql-soft: rgba(138, 111, 42, 0.14);
+    --main: #7a6aa7;
+    --main-soft: rgba(122, 106, 167, 0.13);
+    --cli: #35678f;
+    --cli-soft: rgba(53, 103, 143, 0.13);
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --serif: ui-serif, Georgia, "Times New Roman", serif;
+  }
+  html.dark {
+    --bg: #151615;
+    --surface: #20211f;
+    --surface-2: #2b2c29;
+    --ink: #f7f4ea;
+    --body: #d4cfbf;
+    --muted: #989386;
+    --line: #464640;
+    --line-soft: #31322f;
+    --zone: rgba(247, 244, 234, 0.035);
+    --shadow: rgba(0, 0, 0, 0.28);
+    --common: #73bbb7;
+    --common-soft: rgba(115, 187, 183, 0.15);
+    --engine: #df896b;
+    --engine-soft: rgba(223, 137, 107, 0.15);
+    --infrastructure: #94bd81;
+    --infrastructure-soft: rgba(148, 189, 129, 0.15);
+    --sql: #d1b057;
+    --sql-soft: rgba(209, 176, 87, 0.15);
+    --main: #b2a1e0;
+    --main-soft: rgba(178, 161, 224, 0.16);
+    --cli: #7fb3da;
+    --cli-soft: rgba(127, 179, 218, 0.15);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--body);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 16px 22px;
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--bg);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  .title h1 {
+    margin: 0;
+    color: var(--ink);
+    font-family: var(--serif);
+    font-weight: 520;
+    font-size: 21px;
+  }
+  .title div {
+    margin-top: 3px;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .spacer { flex: 1; }
+  #themeToggle {
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--muted);
+    border-radius: 7px;
+    padding: 7px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+    transition: color .15s ease, border-color .15s ease;
+  }
+  #themeToggle:hover { color: var(--ink); border-color: var(--muted); }
+
+  main { max-width: 1400px; margin: 0 auto; padding: 0 22px 60px; }
+
+  section.intro {
+    padding: 26px 0 6px;
+    max-width: 880px;
+  }
+  section.intro p {
+    font-size: 14.5px;
+    line-height: 1.6;
+    color: var(--body);
+    margin: 0;
+  }
+  section.intro p strong { color: var(--ink); }
+  .badge-row {
+    display: flex;
+    gap: 8px;
+    margin: 14px 0 4px;
+    flex-wrap: wrap;
+  }
+  .badge {
+    font: 10.5px var(--mono);
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 4px 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  h2.section-h {
+    font-family: var(--serif);
+    font-weight: 520;
+    font-size: 17px;
+    color: var(--ink);
+    margin: 34px 0 4px;
+  }
+  .section-sub {
+    color: var(--muted);
+    font: 10.5px var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 14px;
+  }
+
+  .legend {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    color: var(--muted);
+    font: 10.5px var(--mono);
+    margin-bottom: 10px;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { width: 18px; height: 10px; border: 1.3px solid var(--line); border-radius: 3px; background: var(--surface); }
+  .sw.common { background: var(--common-soft); border-color: var(--common); }
+  .sw.engine { background: var(--engine-soft); border-color: var(--engine); }
+  .sw.infrastructure { background: var(--infrastructure-soft); border-color: var(--infrastructure); }
+  .sw.sql { background: var(--sql-soft); border-color: var(--sql); }
+  .sw.main { background: var(--main-soft); border-color: var(--main); }
+  .sw.cli { background: var(--cli-soft); border-color: var(--cli); }
+
+  .diagram-wrap {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--line-soft);
+    border-radius: 12px;
+    padding: 6px;
+  }
+  svg#map { display: block; width: 100%; height: auto; }
+
+  .zone rect {
+    fill: var(--zone);
+    stroke: var(--line);
+    stroke-dasharray: 7 6;
+    stroke-width: 1.1;
+    rx: 16;
+  }
+  .zone .ztitle {
+    fill: var(--muted);
+    font: 700 11.5px var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.10em;
+  }
+
+  .node { cursor: pointer; }
+  .node rect {
+    fill: var(--surface);
+    stroke: var(--line);
+    stroke-width: 1.4;
+    rx: 10;
+    transition: stroke .15s ease, filter .15s ease, stroke-width .15s ease;
+  }
+  .node:hover rect { stroke: var(--ink); filter: drop-shadow(0 7px 14px var(--shadow)); }
+  .node.sel rect { stroke-width: 2.4; filter: drop-shadow(0 7px 14px var(--shadow)); }
+  .node.touched rect { stroke-width: 2.6; }
+  .node .k {
+    fill: var(--muted);
+    font: 700 10px var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    pointer-events: none;
+  }
+  .node .t {
+    fill: var(--ink);
+    font: 700 16px var(--sans);
+    pointer-events: none;
+  }
+  .node .m {
+    fill: var(--muted);
+    font: 11px var(--mono);
+    pointer-events: none;
+  }
+  .node.common rect { fill: var(--common-soft); stroke: var(--common); }
+  .node.engine rect { fill: var(--engine-soft); stroke: var(--engine); }
+  .node.infrastructure rect { fill: var(--infrastructure-soft); stroke: var(--infrastructure); }
+  .node.sql rect { fill: var(--sql-soft); stroke: var(--sql); }
+  .node.main rect { fill: var(--main-soft); stroke: var(--main); }
+  .node.cli rect { fill: var(--cli-soft); stroke: var(--cli); }
+
+  .edge {
+    fill: none;
+    stroke: var(--muted);
+    stroke-width: 1.6;
+    marker-end: url(#arrow);
+  }
+  .edge.soft { stroke-dasharray: 5 5; opacity: .7; }
+
+  .panel {
+    position: absolute;
+    right: 18px;
+    bottom: 18px;
+    width: 360px;
+    max-width: calc(100% - 36px);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px 16px 15px;
+    box-shadow: 0 14px 34px var(--shadow);
+    display: none;
+  }
+  .panel.show { display: block; }
+  .panel h3 {
+    margin: 0 0 3px;
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 17px;
+    font-weight: 520;
+  }
+  .panel .meta {
+    color: var(--muted);
+    font: 10.5px var(--mono);
+    margin-bottom: 9px;
+  }
+  .panel p {
+    margin: 0 0 10px;
+    font-size: 12.3px;
+    line-height: 1.48;
+  }
+  .panel ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; max-height: 260px; overflow-y: auto; }
+  .panel li {
+    font: 11px/1.4 var(--mono);
+    color: var(--body);
+    padding-left: 13px;
+    position: relative;
+  }
+  .panel li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 6px;
+    width: 5px;
+    height: 5px;
+    border-radius: 2px;
+    background: var(--engine);
+  }
+  .panel .pin-hint {
+    margin-top: 10px;
+    font: 10px var(--mono);
+    color: var(--muted);
+  }
+
+  .rail-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .rail-chip {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--body);
+    border-radius: 8px;
+    padding: 9px 12px;
+    font: 11px var(--mono);
+    cursor: pointer;
+    text-align: left;
+    line-height: 1.35;
+    transition: border-color .15s ease, background .15s ease, color .15s ease;
+    min-width: 128px;
+  }
+  .rail-chip b { display: block; color: var(--ink); font-size: 12px; margin-bottom: 2px; }
+  .rail-chip:hover { border-color: var(--muted); }
+  .rail-chip.on { background: var(--engine-soft); border-color: var(--engine); color: var(--ink); }
+  .rail-caption {
+    margin-top: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: var(--surface-2);
+    font-size: 12.5px;
+    line-height: 1.5;
+    display: none;
+  }
+  .rail-caption.show { display: block; }
+  .rail-caption .name { font-family: var(--serif); font-size: 14px; color: var(--ink); margin-bottom: 4px; }
+
+  .changes ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 10px;
+    max-width: 880px;
+  }
+  .changes li {
+    font-size: 13px;
+    line-height: 1.55;
+    padding-left: 16px;
+    position: relative;
+  }
+  .changes li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 7px;
+    width: 6px;
+    height: 6px;
+    border-radius: 2px;
+    background: var(--main);
+  }
+  .changes li b { color: var(--ink); }
+
+  footer {
+    margin-top: 40px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line-soft);
+    color: var(--muted);
+    font: 10.5px var(--mono);
+  }
+
+  @media (max-width: 720px) {
+    .panel { position: static; margin-top: 12px; width: auto; }
+    .rail-chip { min-width: 100px; }
+  }
+</style>
+</head>
+<body>
+<div class="bar">
+  <div class="title">
+    <h1>CppColDBv2 — desired architecture</h1>
+    <div>scaffold module map · C++20 · embedded columnar OLAP engine</div>
+  </div>
+  <div class="spacer"></div>
+  <button id="themeToggle">Theme</button>
+</div>
+
+<main>
+  <section class="intro">
+    <p>
+      CppColDBv2 is an abstractions-first, modular scaffold refactor of CppColDB, a
+      DuckDB-inspired embedded columnar OLAP engine, modeled on the SharpDB V2 rewrite.
+      This is <strong>scaffold only</strong>: declarations are complete across every
+      module, but non-trivial method bodies throw <code>CPPCOLDB_NOT_IMPLEMENTED()</code>.
+      The tree is designed to compile and link; it does not run a query yet. The diagram
+      below maps the six build targets, their one-directional dependency graph, and the
+      bottom-up order in which their contents are meant to be implemented.
+    </p>
+    <div class="badge-row">
+      <span class="badge">6 CMake targets</span>
+      <span class="badge">nested namespaces</span>
+      <span class="badge">ports / adapters split</span>
+      <span class="badge">1:1 mirrored test tree</span>
+    </div>
+  </section>
+
+  <h2 class="section-h">Module map</h2>
+  <div class="section-sub">click or hover a module for its domains and key types</div>
+
+  <div class="legend">
+    <span><i class="sw common"></i>common (leaf)</span>
+    <span><i class="sw engine"></i>engine (core)</span>
+    <span><i class="sw infrastructure"></i>infrastructure (adapters)</span>
+    <span><i class="sw sql"></i>sql (surface)</span>
+    <span><i class="sw main"></i>main (facade)</span>
+    <span><i class="sw cli"></i>cli (entry point)</span>
+  </div>
+
+  <div class="diagram-wrap" id="diagramWrap">
+    <svg id="map" viewBox="0 0 1400 850" preserveAspectRatio="xMidYMid meet" role="img" aria-label="CppColDBv2 module dependency map">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" style="fill: var(--muted)"></path>
+        </marker>
+      </defs>
+
+      <g class="zone">
+        <rect x="40" y="30" width="1320" height="110"></rect>
+        <text class="ztitle" x="60" y="55">entry point</text>
+      </g>
+      <g class="zone">
+        <rect x="40" y="160" width="1320" height="140"></rect>
+        <text class="ztitle" x="60" y="185">facade / composition root</text>
+      </g>
+      <g class="zone">
+        <rect x="40" y="320" width="1320" height="150"></rect>
+        <text class="ztitle" x="60" y="345">adapters + surface (ports / adapters split)</text>
+      </g>
+      <g class="zone">
+        <rect x="40" y="490" width="1320" height="150"></rect>
+        <text class="ztitle" x="60" y="515">engine core</text>
+      </g>
+      <g class="zone">
+        <rect x="40" y="660" width="1320" height="140"></rect>
+        <text class="ztitle" x="60" y="685">foundation (leaf)</text>
+      </g>
+
+      <!-- edges (dependency direction: dependent -> dependency) -->
+      <path class="edge" d="M700,130 L700,195"></path>
+      <path class="edge" d="M620,285 C520,315 400,335 330,355"></path>
+      <path class="edge" d="M780,285 C880,315 1000,335 1070,355"></path>
+      <path class="edge" d="M700,285 L700,525"></path>
+      <path class="edge soft" d="M540,285 C220,340 190,600 560,715"></path>
+      <path class="edge" d="M310,445 C310,478 400,502 560,525"></path>
+      <path class="edge soft" d="M260,445 C210,540 300,655 560,710"></path>
+      <path class="edge" d="M1090,445 C1090,478 1000,502 840,525"></path>
+      <path class="edge soft" d="M1140,445 C1190,540 1100,655 840,710"></path>
+      <path class="edge" d="M700,615 L700,695"></path>
+
+      <!-- cli -->
+      <g class="node cli" data-k="cli">
+        <rect x="560" y="60" width="280" height="70"></rect>
+        <text class="k" x="580" y="82">cppcoldbv2_cli · exe</text>
+        <text class="t" x="580" y="105">cli</text>
+        <text class="m" x="580" y="122">REPL entry point</text>
+      </g>
+
+      <!-- main -->
+      <g class="node main" data-k="main">
+        <rect x="520" y="195" width="360" height="90"></rect>
+        <text class="k" x="540" y="220">cppcoldbv2 · facade</text>
+        <text class="t" x="540" y="246">main</text>
+        <text class="m" x="540" y="266">Database, Connection, ClientContext</text>
+      </g>
+
+      <!-- infrastructure -->
+      <g class="node infrastructure" data-k="infrastructure">
+        <rect x="120" y="355" width="380" height="90"></rect>
+        <text class="k" x="140" y="380">cppcoldbv2_infrastructure</text>
+        <text class="t" x="140" y="406">infrastructure</text>
+        <text class="m" x="140" y="426">io, time, logging adapters</text>
+      </g>
+
+      <!-- sql -->
+      <g class="node sql" data-k="sql">
+        <rect x="900" y="355" width="380" height="90"></rect>
+        <text class="k" x="920" y="380">cppcoldbv2_sql</text>
+        <text class="t" x="920" y="406">sql</text>
+        <text class="m" x="920" y="426">parser, planner -&gt; engine operator tree</text>
+      </g>
+
+      <!-- engine -->
+      <g class="node engine" data-k="engine">
+        <rect x="460" y="525" width="480" height="90"></rect>
+        <text class="k" x="480" y="550">cppcoldbv2_engine</text>
+        <text class="t" x="480" y="576">engine</text>
+        <text class="m" x="480" y="596">abstractions, storage, catalog, transaction, checkpoint, execution, scheduler, profiler</text>
+      </g>
+
+      <!-- common -->
+      <g class="node common" data-k="common">
+        <rect x="560" y="695" width="280" height="80"></rect>
+        <text class="k" x="580" y="718">cppcoldbv2_common · leaf</text>
+        <text class="t" x="580" y="742">common</text>
+        <text class="m" x="580" y="760">types, primitives, exceptions</text>
+      </g>
+    </svg>
+
+    <section class="panel" id="detail">
+      <h3>Click a module</h3>
+      <div class="meta">domains and key types</div>
+      <p>Hover any box for a quick look, click to pin its notes open while you read.</p>
+    </section>
+  </div>
+
+  <h2 class="section-h">Implementation order</h2>
+  <div class="section-sub">bottom-up build sequence — click a step to highlight the modules it touches</div>
+
+  <div class="rail-row" id="rail"></div>
+  <div class="rail-caption" id="railCaption"></div>
+
+  <h2 class="section-h">What changed from v1</h2>
+  <div class="section-sub">carried over from the SharpDB V2 rewrite</div>
+  <section class="changes">
+    <ul>
+      <li><b>Abstractions layer introduced.</b> Every core engine subsystem now has a pure-virtual <code>I*</code> interface under <code>engine/abstractions/</code>; v1 had no interface layer.</li>
+      <li><b>Strong-typed IDs.</b> <code>BlockId</code>, <code>TransactionId</code>, <code>RowGroupId</code>, <code>RowId</code>, <code>ColumnId</code>, <code>TableId</code>, <code>Timestamp</code> are distinct structs, replacing v1's raw <code>using</code> aliases.</li>
+      <li><b>New <code>primitives/</code> folder.</b> Domain-agnostic concurrency and allocation utilities (<code>CacheLinePadded</code>, <code>Spinlock</code>, <code>ObjectPool</code>, <code>ArenaAllocator</code>, <code>ConcurrentQueue</code>, <code>bit_utils</code>) did not exist as a separate concern in v1.</li>
+      <li><b>Nested namespaces.</b> <code>cppcoldb::&lt;module&gt;::&lt;domain&gt;</code> replaces v1's flat <code>cppcoldb</code> namespace.</li>
+      <li><b>Modular multi-target CMake.</b> Six independent targets (<code>cppcoldbv2_common</code>, <code>cppcoldbv2_engine</code>, <code>cppcoldbv2_infrastructure</code>, <code>cppcoldbv2_sql</code>, <code>cppcoldbv2</code>, <code>cppcoldbv2_cli</code>) replace v1's single globbed library.</li>
+      <li><b>Ports / adapters split.</b> Engine defines I/O ports (<code>abstractions/io/</code>); infrastructure supplies the concrete adapters (<code>PosixFileSystem</code>, <code>SystemClock</code>, loggers).</li>
+      <li><b>1:1 mirrored test tree.</b> The <code>test/</code> tree mirrors <code>src/</code> module for module, with fakes implementing the same abstractions.</li>
+    </ul>
+  </section>
+
+  <footer>CppColDBv2 · design/v2-architecture.html · self-contained, offline-renderable</footer>
+</main>
+
+<script>
+const moduleDetails = {
+  common: {
+    title: "common",
+    meta: "cppcoldbv2_common — no dependencies (leaf)",
+    desc: "Foundation module depended on by every other target. Provides strong-typed identifiers in place of v1's raw using-aliases, the Value/DataChunk vectorized data model, domain-agnostic concurrency primitives, and the exception hierarchy plus the stub macro every module's .cpp files use.",
+    bullets: [
+      "types/ — strong IDs: BlockId, TransactionId, RowGroupId, RowId, ColumnId, TableId, Timestamp",
+      "types/ — TypeId, Value, DataChunk (DataVector), IsolationLevel",
+      "primitives/ — CacheLinePadded, Spinlock, ObjectPool, ArenaAllocator, ConcurrentQueue, bit_utils",
+      "exception.hpp — CppColDBException, ParseError, BindError, RuntimeError, IOError",
+      "not_implemented.hpp — CPPCOLDB_NOT_IMPLEMENTED() macro, NotImplementedError"
+    ]
+  },
+  engine: {
+    title: "engine",
+    meta: "cppcoldbv2_engine — depends on common",
+    desc: "The database core: abstractions-first interfaces for every subsystem, columnar storage, MVCC transactions, checkpoint/recovery, and the vectorized execution runtime. Concrete classes implement their I* interface from the same domain namespace, e.g. BufferManager implements IBufferManager in cppcoldb::engine::storage.",
+    bullets: [
+      "abstractions/ — storage, catalog, transaction, checkpoint, compression, scheduler, io interfaces",
+      "storage/ — buffer_manager, block_file, wal",
+      "storage/columnar/ — row_group, column_chunk, column_segment, version_info",
+      "storage/compression/ — bit_packing, delta, dictionary, rle codecs",
+      "storage/ — partition_info",
+      "catalog/ — ICatalog, ISchemaStore implementations",
+      "transaction/ — mvcc, undo, version_manager",
+      "checkpoint/ — checkpoint_manager, recovery_manager",
+      "execution/ — executor, pipeline, physical operators, join/aggregate hash tables",
+      "profiler/ — query and operator profiling",
+      "scheduler/ — ITaskScheduler implementation"
+    ]
+  },
+  infrastructure: {
+    title: "infrastructure",
+    meta: "cppcoldbv2_infrastructure — depends on common, engine",
+    desc: "Adapters implementing engine's I/O ports (engine/abstractions/io/). Keeps concrete OS, filesystem, clock, and logging concerns out of the engine core, per the ports/adapters split.",
+    bullets: [
+      "io/ — PosixFileSystem implementing IFileSystem",
+      "time/ — SystemClock implementing IClock",
+      "logging/ — ConsoleLogger, NullLogger implementing ILogger"
+    ]
+  },
+  sql: {
+    title: "sql",
+    meta: "cppcoldbv2_sql — depends on common, engine",
+    desc: "SQL surface: parses text into an AST, binds and optimizes it, then emits a physical plan as an engine operator tree. CppColDB is OLAP-first, so the vectorized runtime lives in engine/execution rather than in sql — sql only builds the plan that runtime executes.",
+    bullets: [
+      "parser/ — tokenizer, parser, AST",
+      "planner/ — binder (semantic analysis)",
+      "planner/ — optimizer (logical rewrites)",
+      "planner/ — logical_planner",
+      "planner/ — physical_planner (emits engine operator tree)"
+    ]
+  },
+  main: {
+    title: "main",
+    meta: "cppcoldbv2 — depends on common, engine, infrastructure, sql",
+    desc: "Public facade and composition root. Wires concrete engine implementations to their infrastructure adapters and the sql layer, and exposes the embeddable API surface applications use.",
+    bullets: [
+      "Database — owns catalog, storage, transaction manager, checkpoint manager",
+      "Connection — per-session handle",
+      "ClientContext — per-query execution context (parse -> bind -> optimize -> plan -> execute)"
+    ]
+  },
+  cli: {
+    title: "cli",
+    meta: "cppcoldbv2_cli — depends on main (PRIVATE)",
+    desc: "Thin executable: a REPL that reads one SQL statement per line and delegates entirely to the main facade. Contains no engine, sql, or storage logic of its own.",
+    bullets: [
+      "main.cpp — REPL loop, argument parsing (db path or :memory:)"
+    ]
+  }
+};
+
+const railSteps = [
+  { n: 1, label: "common types/primitives", modules: ["common"], desc: "Strong-typed IDs, Value/DataChunk, and the lock-free/allocation primitives. Everything else depends on this; build and unit-test it first." },
+  { n: 2, label: "storage (block/buffer/wal)", modules: ["common", "engine"], desc: "BlockFile, BufferManager, and WAL give durable paged storage before any columnar logic exists." },
+  { n: 3, label: "columnar + compression", modules: ["engine"], desc: "RowGroup, ColumnChunk, ColumnSegment, and version_info, plus the bit-packing, delta, dictionary, and RLE codecs." },
+  { n: 4, label: "catalog + transaction/MVCC", modules: ["engine"], desc: "Schema catalog and MVCC version chains; undo buffers make rollback possible." },
+  { n: 5, label: "checkpoint + recovery", modules: ["engine"], desc: "CheckpointManager snapshots catalog and storage; RecoveryManager replays the WAL after the last checkpoint on startup." },
+  { n: 6, label: "execution runtime + operators", modules: ["engine"], desc: "Vectorized executor, pipeline scheduling, physical operators, and join/aggregate hash tables." },
+  { n: 7, label: "sql parser + planner", modules: ["sql", "engine"], desc: "Tokenizer, parser, AST, binder, optimizer, and physical planner, emitting an engine operator tree." },
+  { n: 8, label: "main facade wiring", modules: ["main", "common", "engine", "infrastructure", "sql"], desc: "Database/Connection/ClientContext composition root wires engine, infrastructure adapters, and sql together into the embeddable facade." },
+  { n: 9, label: "profiler + scheduler", modules: ["engine"], desc: "Cross-cutting task scheduling and query/operator profiling, layered on top of the execution runtime." },
+  { n: 10, label: "cli", modules: ["cli", "main"], desc: "REPL executable depending only on the public main facade." }
+];
+
+let pinnedKey = null;
+
+function renderDetail(key) {
+  const item = moduleDetails[key];
+  if (!item) return;
+  document.getElementById("detail").innerHTML = `
+    <h3>${item.title}</h3>
+    <div class="meta">${item.meta}</div>
+    <p>${item.desc}</p>
+    <ul>${item.bullets.map(b => `<li>${b}</li>`).join("")}</ul>
+    <div class="pin-hint">${pinnedKey === key ? "pinned — click again to unpin" : "click to pin"}</div>
+  `;
+  document.getElementById("detail").classList.add("show");
+}
+
+document.querySelectorAll(".node").forEach(node => {
+  const key = node.dataset.k;
+  node.addEventListener("mouseenter", () => renderDetail(key));
+  node.addEventListener("mouseleave", () => {
+    if (pinnedKey) {
+      renderDetail(pinnedKey);
+    } else {
+      document.getElementById("detail").classList.remove("show");
+    }
+  });
+  node.addEventListener("click", () => {
+    if (pinnedKey === key) {
+      pinnedKey = null;
+      node.classList.remove("sel");
+      document.getElementById("detail").classList.remove("show");
+    } else {
+      document.querySelectorAll(".node").forEach(n => n.classList.remove("sel"));
+      pinnedKey = key;
+      node.classList.add("sel");
+      renderDetail(key);
+    }
+  });
+});
+
+const railEl = document.getElementById("rail");
+railSteps.forEach(step => {
+  const btn = document.createElement("button");
+  btn.className = "rail-chip";
+  btn.dataset.step = step.n;
+  btn.innerHTML = `<b>${step.n}. ${step.label}</b>`;
+  railEl.appendChild(btn);
+});
+
+let activeStep = null;
+function setStep(n) {
+  const cap = document.getElementById("railCaption");
+  if (activeStep === n) {
+    activeStep = null;
+    document.querySelectorAll(".rail-chip").forEach(c => c.classList.remove("on"));
+    document.querySelectorAll(".node").forEach(node => node.classList.remove("touched"));
+    cap.classList.remove("show");
+    return;
+  }
+  activeStep = n;
+  const step = railSteps.find(s => s.n === n);
+  document.querySelectorAll(".rail-chip").forEach(c => c.classList.toggle("on", Number(c.dataset.step) === n));
+  document.querySelectorAll(".node").forEach(node => node.classList.toggle("touched", step.modules.includes(node.dataset.k)));
+  cap.classList.add("show");
+  cap.innerHTML = `<div class="name">Step ${step.n} — ${step.label}</div><div>${step.desc}</div>`;
+}
+
+railEl.addEventListener("click", event => {
+  const chip = event.target.closest(".rail-chip");
+  if (chip) setStep(Number(chip.dataset.step));
+});
+
+document.getElementById("themeToggle").addEventListener("click", () => {
+  const html = document.documentElement;
+  html.classList.toggle("dark");
+  localStorage.setItem("cppcoldb-v2-theme", html.classList.contains("dark") ? "dark" : "light");
+});
+</script>
+</body>
+</html>
